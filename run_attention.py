@@ -132,6 +132,10 @@ def main():
         return
 
     tracer = OmniTracer(model_name="qwen3vl", method=args.method, model_path=args.model)
+    device = tracer.bundle.model.device
+    print(f"Model loaded on {device}", flush=True)
+    if device.type == "cpu":
+        print("WARNING: running on the CPU, which is extremely slow. Check the GPU with nvidia-smi.", flush=True)
     generation_config = GenerationConfig(max_new_tokens=args.max_new_tokens)
     use_cuda = torch.cuda.is_available()
 

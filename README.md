@@ -11,6 +11,12 @@ python -m spacy download en_core_web_sm
 python download_data.py
 ```
 
+On a GPU server, check the "CUDA Version" that `nvidia-smi` reports. If it is 12.x, install a matching PyTorch build before `pip install -r requirements.txt`, because the default build needs a newer driver:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
 `download_data.py` downloads [DyBench](https://huggingface.co/datasets/ddz16/DyBench) (about 8 GB once unzipped) into `DyBench/`.
 
 ## Recording attention

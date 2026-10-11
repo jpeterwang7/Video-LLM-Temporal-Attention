@@ -77,10 +77,13 @@ def load_model_qwen3vl(model_path: str | None = None) -> ModelBundle:
 
     # The LLM returns last-query attention weights; the vision encoder keeps the fast path.
     AttentionInterface.register(LAST_QUERY_ATTENTION, sdpa_last_query_attention)
+    # With a GPU present, load onto it or fail; "auto" silently falls back to the CPU
+    # when the GPU is busy, which is far too slow for this model.
+    device_map = "cuda:0" if torch.cuda.is_available() else "auto"
     model = Qwen3VLForConditionalGeneration.from_pretrained(
         path,
         dtype="auto",
-        device_map="auto",
+        device_map=device_map,
         attn_implementation={"text_config": LAST_QUERY_ATTENTION, "vision_config": "sdpa"},
     )
     model.eval()
