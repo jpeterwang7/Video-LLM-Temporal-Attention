@@ -1,1 +1,7 @@
 huggingface_hub
+torch
+torchvision
+accelerate
+# The Qwen3-VL attention code was tested against this exact version
+transformers==4.57.6
+-e ./OmniTrace
