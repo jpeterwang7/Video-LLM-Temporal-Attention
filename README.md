@@ -46,6 +46,29 @@ per_frame = att.mean(0).sum((1, 2))    # attention on each time step, averaged o
 heatmap = att.mean(0)[per_frame.argmax()]  # spatial map of the most attended time step
 ```
 
+## Analysing attention
+
+```bash
+python analyze_attention.py
+```
+
+This reads `outputs/qwen3vl_8b/` and writes tables and charts to `outputs/qwen3vl_8b/analysis/`, all based on the attention of the first generated token (the answer letter):
+
+- `temporal_profile.png`: where in the video the attention falls, for right and wrong answers.
+- `vision_share_by_layer.png`: how much attention the video gets in each layer, as opposed to the text.
+- `pair_similarity.png`: for time-reversed pairs, whether the twin's attention sits at the same time steps as the original's (position) or on the same frames (content).
+- `per_video.csv`, `per_pair.csv`, `summary.txt`: the numbers behind the charts.
+
+`dybench_pair_types.json` records how each DyBench `_reversed` twin relates to its original, measured from the pixels. They are not all time reversals:
+
+| Category | Time-reversed | Mirrored left-right | Other |
+|---|---|---|---|
+| Reversible dynamics | 600 | 0 | 0 |
+| Moving direction | 395 | 105 | 0 |
+| Event sequence | 6 | 0 | 401 |
+
+The event sequence twins swap the order of the two clips instead of reversing the frames. The content-versus-position comparison only uses the time-reversed pairs.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:
