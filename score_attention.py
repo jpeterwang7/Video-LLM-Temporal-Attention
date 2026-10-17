@@ -7,6 +7,10 @@ averaged over layers, with all tokens and with the sink tokens (each video's top
     AUROC  how well attention ranks marked tokens above unmarked ones (0.5 = chance, 1 = perfect)
     lift   share of attention on marked tokens divided by the share of tokens that are marked
            (1 = no better than an even spread)
+A control scores each video's labels against the attention of other videos with the same token
+grid. If attention simply favours some part of the frame where objects tend to be (such as the
+centre), the control scores as well as the real attention; only alignment with this video's
+content beats it.
 Writes to <run-dir>/analysis/labels/: summary.txt, per_video.csv, auroc_by_layer.png.
 """
 import argparse
@@ -19,6 +23,7 @@ import numpy as np
 from analyze_attention import BLUE, MUTED, ORANGE, TITLES, finish, new_figure, write_csv
 
 SINK_FRACTION = 0.01
+CONTROL_VIDEOS = 20
 
 
 def auroc(scores, labels):
@@ -27,16 +32,8 @@ def auroc(scores, labels):
     n_pos, n_neg = labels.sum(), (~labels).sum()
     if n_pos == 0 or n_neg == 0:
         return float("nan")
-    order = np.argsort(scores, kind="mergesort")
-    sorted_scores = scores[order]
-    ranks = np.empty(len(scores))
-    i = 0
-    while i < len(scores):
-        j = i
-        while j + 1 < len(scores) and sorted_scores[j + 1] == sorted_scores[i]:
-            j += 1
-        ranks[order[i:j + 1]] = (i + j) / 2 + 1
-        i = j + 1
+    _, inverse, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    ranks = (np.cumsum(counts) - (counts - 1) / 2)[inverse]
     return float((ranks[labels].sum() - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg))
 
 
@@ -92,6 +89,10 @@ def plot_by_layer(rows, path):
         for key, label, color in (("all", "All video tokens", BLUE), ("no_sink", "Sink tokens left out", ORANGE)):
             curve = np.nanmean([r["scores"][key]["layer_auroc"] for r in group], axis=0)
             ax.plot(layers, curve, color=color, linewidth=2, solid_capstyle="round", solid_joinstyle="round", label=label)
+        controls = [r["control"]["layer_auroc"] for r in group if r["control"] is not None]
+        if controls:
+            ax.plot(layers, np.nanmean(controls, axis=0), color=MUTED, linewidth=2, solid_capstyle="round",
+                    label="Control: other videos' attention")
         ax.axhline(0.5, color=MUTED, linewidth=1)
         ax.set_title(f"{TITLES[category]}  (n = {len(group)})", fontsize=10, color="#52514e", loc="left")
         ax.set_xlim(1, layers[-1])
@@ -116,6 +117,21 @@ def summary_lines(rows):
             lf, lf_ci, _ = mean_ci([r["scores"][key]["lift"] for r in group])
             lines.append(f"{name:<34}{n:>7}{a:>10.3f} +/- {a_ci:.3f}{lf:>8.2f} +/- {lf_ci:.2f}")
         lines.append("")
+    with_control = [r for r in rows if r["control"] is not None]
+    if with_control:
+        real = [r["scores"]["no_sink"]["auroc"] for r in with_control]
+        ctrl = [r["control"]["auroc"] for r in with_control]
+        diff = mean_ci([a - b for a, b in zip(real, ctrl)])
+        beats = sum(a > b for a, b in zip(real, ctrl))
+        lines += [
+            "Control: the same labels scored against other videos' attention (same token grid, sinks left out)",
+            f"{'videos with a control':<34}{len(with_control):>7}",
+            f"{'AUROC, real attention':<34}{'':>7}{mean_ci(real)[0]:>10.3f} +/- {mean_ci(real)[1]:.3f}",
+            f"{'AUROC, control':<34}{'':>7}{mean_ci(ctrl)[0]:>10.3f} +/- {mean_ci(ctrl)[1]:.3f}",
+            f"{'difference (real - control)':<34}{'':>7}{diff[0]:>10.3f} +/- {diff[1]:.3f}",
+            f"{'videos where real beats control':<34}{beats:>7} of {len(with_control)}",
+            "",
+        ]
     layer = np.nanmean([r["scores"]["no_sink"]["layer_auroc"] for r in rows], axis=0)
     best = np.argsort(layer)[::-1][:5] + 1
     lines += [
@@ -144,6 +160,28 @@ def main():
             if "error" not in row:
                 results[(row["category"], row["video"])] = row
 
+    by_grid = {}
+    for key, row in results.items():
+        by_grid.setdefault(tuple(row["grid_thw"]), []).append(key)
+    rng = np.random.default_rng(0)
+    cache = {}
+
+    def attention_of(key):
+        if key not in cache:
+            cache[key] = np.load(args.run_dir / results[key]["attention_file"])["vision_attention"][0].astype(np.float64)
+        return cache[key]
+
+    def control(label, mask):
+        base = label["video"].replace("_reversed.mp4", ".mp4")
+        twins = {base, base.replace(".mp4", "_reversed.mp4")}
+        pool = [k for k in by_grid.get(tuple(label["grid"]), []) if k[1] not in twins]
+        if not pool:
+            return None
+        picks = [pool[i] for i in rng.choice(len(pool), size=min(CONTROL_VIDEOS, len(pool)), replace=False)]
+        scored = [score_video(attention_of(k), mask)["no_sink"] for k in picks]
+        return {"auroc": float(np.nanmean([s["auroc"] for s in scored])),
+                "layer_auroc": np.nanmean([s["layer_auroc"] for s in scored], axis=0), "videos": len(picks)}
+
     rows = []
     for path in args.labels:
         data = json.load(open(path))
@@ -158,7 +196,7 @@ def main():
                                  f"for {label['id']}")
             rows.append({"annotator": data["annotator"], "category": label["category"], "video": label["video"],
                          "correct": bool(result["correct"]), "wrong_answer_flag": label["note"].startswith("WRONG ANSWER"),
-                         "scores": score_video(attention, mask)})
+                         "scores": score_video(attention, mask), "control": control(label, mask)})
     print(f"Scored {len(rows)} labelled videos from {len(args.labels)} file(s)")
 
     out_dir = args.run_dir / "analysis" / "labels"
@@ -168,9 +206,11 @@ def main():
          "wrong_answer_flag": r["wrong_answer_flag"], "marked_fraction": r["scores"]["marked_fraction"],
          "auroc_all": r["scores"]["all"]["auroc"], "lift_all": r["scores"]["all"]["lift"],
          "auroc_no_sink": r["scores"]["no_sink"]["auroc"], "lift_no_sink": r["scores"]["no_sink"]["lift"],
-         "sink_on_label": r["scores"]["sink_on_label"]} for r in rows],
+         "sink_on_label": r["scores"]["sink_on_label"],
+         "auroc_control": r["control"]["auroc"] if r["control"] else "",
+         "control_videos": r["control"]["videos"] if r["control"] else 0} for r in rows],
         ["annotator", "category", "video", "correct", "wrong_answer_flag", "marked_fraction", "auroc_all",
-         "lift_all", "auroc_no_sink", "lift_no_sink", "sink_on_label"])
+         "lift_all", "auroc_no_sink", "lift_no_sink", "sink_on_label", "auroc_control", "control_videos"])
     plot_by_layer(rows, out_dir / "auroc_by_layer.png")
     lines = summary_lines(rows)
     (out_dir / "summary.txt").write_text("\n".join(lines) + "\n")
