@@ -101,6 +101,16 @@ This tests whether the start-of-video attention in `temporal_profile.png` comes 
 
 To redo the main analysis without each video's top 1% of tokens, run `python analyze_attention.py --drop-top 0.01`. Results go to `outputs/qwen3vl_8b/analysis_drop_top/`, leaving `analysis/` unchanged.
 
+## Labelling what matters
+
+```bash
+python make_labeling_page.py
+```
+
+This builds `outputs/labeling/index.html`, a page for marking which time steps a person needs to see to answer each question, and where in those frames. It shows each video's frames exactly as the model saw them. Open it by double-clicking; no server is needed. By default it picks 8 time-reversed pairs (16 videos), 2 for each combination of moving direction or reversible dynamics with both right or one right.
+
+Labels save in the browser as you go. "Download labels" writes `labels_<name>.json`; keep these in `labels/`. Each label records the needed time steps, the boxes as fractions of the frame, and the token-grid cells the boxes cover. The `outputs/labeling` folder includes the videos, so it can be zipped and sent to a second labeller.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attention Labelling</title>
+<style>
+  :root {
+    --surface: #fcfcfb; --plane: #f4f3ef; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --line: #e1e0d9; --accent: #eb6834; --accent-soft: #fbe3d8; --blue: #2a78d6; --good: #0c7a0c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--plane); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--surface); border-bottom: 1px solid var(--line);
+           padding: 10px 20px; display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  header .spacer { flex: 1; }
+  button, .filebtn { font: inherit; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px;
+           background: var(--surface); color: var(--ink); cursor: pointer; }
+  button:hover, .filebtn:hover { background: var(--plane); }
+  button.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  input[type=text], textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+           background: #fff; color: var(--ink); }
+  .status { color: var(--muted); font-size: 13px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px; }
+  section { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
+            margin-bottom: 16px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .meta { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
+  .question { font-size: 17px; font-weight: 600; margin: 2px 0 8px; }
+  ol.options { margin: 0 0 8px 0; padding-left: 22px; }
+  ol.options li.answer { font-weight: 600; }
+  ol.options li.answer::after { content: "  (correct)"; color: var(--good); font-weight: 500; }
+  .top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+  video { width: 100%; max-height: 300px; background: #000; border-radius: 8px; }
+  details { color: var(--ink-2); font-size: 14px; }
+  details li { margin: 3px 0; }
+  .steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .step { border: 2px solid var(--line); border-radius: 8px; overflow: hidden; cursor: pointer; background: #fff;
+          position: relative; user-select: none; }
+  .step img { display: block; width: 100%; }
+  .step .cap { font-size: 12px; padding: 4px 8px; color: var(--ink-2); display: flex; justify-content: space-between; }
+  .step.on { border-color: var(--accent); background: var(--accent-soft); }
+  .step.on .cap { color: var(--ink); font-weight: 600; }
+  .step .tick { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 50%;
+                background: rgba(255,255,255,.9); border: 2px solid var(--line); display: grid; place-items: center;
+                font-size: 13px; font-weight: 700; color: transparent; }
+  .step.on .tick { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .editor { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 14px; align-items: start;
+            padding: 12px 0; border-top: 1px solid var(--line); }
+  .editor:first-of-type { border-top: 0; }
+  .draw { position: relative; cursor: crosshair; touch-action: none; user-select: none; }
+  .draw img { display: block; width: 100%; border-radius: 6px; pointer-events: none; }
+  .box { position: absolute; border: 2.5px solid var(--accent); outline: 1.5px solid #fff; background: rgba(235,104,52,.12); }
+  .side img { width: 100%; border-radius: 6px; display: block; }
+  .side .meta { margin-top: 6px; }
+  .empty { color: var(--muted); font-size: 14px; }
+  .row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  textarea { width: 100%; min-height: 54px; }
+  .done { color: var(--good); font-weight: 600; }
+  @media (max-width: 800px) { .top, .editor { grid-template-columns: 1fr; } main { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Attention labelling</h1>
+  <label class="row" style="gap:6px">Your name <input type="text" id="annotator" size="12" placeholder="e.g. Peter"></label>
+  <button id="prev">&larr; Previous</button>
+  <span id="progress"></span>
+  <button id="next">Next &rarr;</button>
+  <span class="spacer"></span>
+  <span class="status" id="saved"></span>
+  <label class="filebtn">Load labels<input type="file" id="load" accept=".json" hidden></label>
+  <button class="primary" id="download">Download labels</button>
+</header>
+<main>
+  <section>
+    <div class="top">
+      <div>
+        <div class="meta" id="meta"></div>
+        <div class="question" id="question"></div>
+        <ol class="options" id="options" type="A"></ol>
+        <button id="toggle-answer">Show answer</button>
+        <details style="margin-top:12px">
+          <summary>How to label</summary>
+          <ol>
+            <li>Watch the video, then read the question.</li>
+            <li>Below, click every time step a person <b>needs</b> to see to answer. Leave out steps that only repeat what you already know.</li>
+            <li>For each step you picked, drag a box around the object or region that carries the answer. Several boxes are fine; mark the minimum, never background.</li>
+            <li>If you can't tell what is needed, tick "Unsure" and say why.</li>
+            <li>Label each video on its own, even when you recognise its reversed twin.</li>
+          </ol>
+        </details>
+      </div>
+      <video id="video" controls loop muted playsinline></video>
+    </div>
+  </section>
+  <section>
+    <h2>1. Which time steps are needed? <span class="status">Each step is 2 frames, as the model saw them; the first frame is shown.</span></h2>
+    <div class="steps" id="steps"></div>
+  </section>
+  <section>
+    <h2>2. Where in each needed step? <span class="status">Drag on the frame to draw a box.</span></h2>
+    <div id="editors"></div>
+  </section>
+  <section>
+    <div class="row">
+      <label class="row" style="gap:6px"><input type="checkbox" id="unsure"> Unsure</label>
+      <span id="item-status"></span>
+    </div>
+    <textarea id="note" placeholder="Notes (optional): why unsure, anything odd about the video"></textarea>
+  </section>
+</main>
+<script>
+const ITEMS = __ITEMS__;
+const KEY = "attention-labels-v1";
+let labels = {};
+let index = 0;
+let showAnswer = false;
+
+function load() {
+  try { const s = JSON.parse(localStorage.getItem(KEY) || "{}"); labels = s.labels || {}; index = Math.min(s.index || 0, ITEMS.length - 1);
+        document.getElementById("annotator").value = s.annotator || ""; } catch (e) { labels = {}; }
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify({labels, index, annotator: document.getElementById("annotator").value}));
+        document.getElementById("saved").textContent = "Saved in this browser"; }
+  catch (e) { document.getElementById("saved").textContent = "Not saved in browser: download your labels before closing"; }
+}
+function entry(item) {
+  if (!labels[item.id]) labels[item.id] = {needed: [], boxes: {}, unsure: false, note: ""};
+  return labels[item.id];
+}
+function isDone(item) {
+  const e = labels[item.id];
+  if (!e) return false;
+  if (e.unsure) return true;
+  return e.needed.length > 0 && e.needed.every(t => (e.boxes[t] || []).length > 0);
+}
+function touch(item) { entry(item).updated = new Date().toISOString(); save(); renderStatus(); }
+
+function render() {
+  const item = ITEMS[index], e = entry(item);
+  document.getElementById("progress").textContent = `Video ${index + 1} of ${ITEMS.length}`;
+  document.getElementById("meta").textContent = `${item.title} · ${item.video}`;
+  document.getElementById("question").textContent = item.question;
+  const ol = document.getElementById("options"); ol.innerHTML = "";
+  item.candidates.forEach(c => { const li = document.createElement("li"); li.textContent = c;
+    if (showAnswer && c === item.answer) li.className = "answer"; ol.appendChild(li); });
+  document.getElementById("toggle-answer").textContent = showAnswer ? "Hide answer" : "Show answer";
+  const v = document.getElementById("video");
+  if (v.getAttribute("src") !== item.video_path) { v.setAttribute("src", item.video_path); }
+  const grid = document.getElementById("steps"); grid.innerHTML = "";
+  item.steps.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "step" + (e.needed.includes(s.t) ? " on" : "");
+    card.innerHTML = `<img src="${s.frames[0]}" alt=""><div class="tick">&#10003;</div>` +
+                     `<div class="cap"><span>Step ${s.t + 1}</span><span>${s.time.toFixed(1)} s</span></div>`;
+    card.onclick = () => {
+      e.needed = e.needed.includes(s.t) ? e.needed.filter(t => t !== s.t) : [...e.needed, s.t].sort((a, b) => a - b);
+      if (!e.needed.includes(s.t)) delete e.boxes[s.t];
+      touch(item); render();
+    };
+    grid.appendChild(card);
+  });
+  renderEditors(item, e);
+  document.getElementById("unsure").checked = !!e.unsure;
+  document.getElementById("note").value = e.note || "";
+  renderStatus();
+}
+
+function renderEditors(item, e) {
+  const wrap = document.getElementById("editors"); wrap.innerHTML = "";
+  if (!e.needed.length) { wrap.innerHTML = `<p class="empty">Pick at least one time step above.</p>`; return; }
+  e.needed.forEach(t => {
+    const s = item.steps[t];
+    const row = document.createElement("div"); row.className = "editor";
+    const draw = document.createElement("div"); draw.className = "draw";
+    draw.innerHTML = `<img src="${s.frames[0]}" alt="">`;
+    const side = document.createElement("div"); side.className = "side";
+    side.innerHTML = `<img src="${s.frames[1]}" alt=""><div class="meta">Step ${t + 1} at ${s.time.toFixed(1)} s. ` +
+                     `Left: first frame (draw here). Above: second frame, for reference.</div>`;
+    const clear = document.createElement("button"); clear.textContent = "Clear boxes";
+    clear.onclick = () => { e.boxes[t] = []; touch(item); paint(); };
+    const count = document.createElement("div"); count.className = "meta";
+    side.appendChild(count); side.appendChild(clear);
+    row.appendChild(draw); row.appendChild(side); wrap.appendChild(row);
+
+    function paint() {
+      draw.querySelectorAll(".box").forEach(b => b.remove());
+      (e.boxes[t] || []).forEach(b => addBox(b));
+      const n = (e.boxes[t] || []).length;
+      count.innerHTML = n ? `<span class="done">${n} box${n > 1 ? "es" : ""}</span>` : "No box yet";
+    }
+    function addBox(b) {
+      const d = document.createElement("div"); d.className = "box";
+      d.style.left = b[0] * 100 + "%"; d.style.top = b[1] * 100 + "%";
+      d.style.width = (b[2] - b[0]) * 100 + "%"; d.style.height = (b[3] - b[1]) * 100 + "%";
+      draw.appendChild(d); return d;
+    }
+    let start = null, temp = null;
+    const pos = ev => { const r = draw.getBoundingClientRect();
+      return [Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height))]; };
+    draw.addEventListener("pointerdown", ev => { draw.setPointerCapture(ev.pointerId); start = pos(ev); temp = addBox([...start, ...start]); });
+    draw.addEventListener("pointermove", ev => { if (!start) return; const p = pos(ev);
+      const b = [Math.min(start[0], p[0]), Math.min(start[1], p[1]), Math.max(start[0], p[0]), Math.max(start[1], p[1])];
+      temp.style.left = b[0] * 100 + "%"; temp.style.top = b[1] * 100 + "%";
+      temp.style.width = (b[2] - b[0]) * 100 + "%"; temp.style.height = (b[3] - b[1]) * 100 + "%"; });
+    draw.addEventListener("pointerup", ev => { if (!start) return; const p = pos(ev);
+      const b = [Math.min(start[0], p[0]), Math.min(start[1], p[1]), Math.max(start[0], p[0]), Math.max(start[1], p[1])];
+      start = null; temp.remove(); temp = null;
+      if ((b[2] - b[0]) > 0.01 && (b[3] - b[1]) > 0.01) {
+        e.boxes[t] = [...(e.boxes[t] || []), b.map(x => Math.round(x * 10000) / 10000)]; touch(item); }
+      paint(); });
+    paint();
+  });
+}
+
+function renderStatus() {
+  const done = ITEMS.filter(isDone).length;
+  const here = isDone(ITEMS[index]);
+  document.getElementById("item-status").innerHTML =
+    (here ? `<span class="done">This video is labelled.</span>` : `<span class="status">This video is not finished yet.</span>`) +
+    ` <span class="status">${done} of ${ITEMS.length} videos labelled.</span>`;
+}
+
+function cellsFor(item, boxes) {
+  const [h, w] = item.frame_size, p = item.patch, rows = h / p, cols = w / p, out = new Set();
+  boxes.forEach(([x0, y0, x1, y1]) => {
+    const c0 = Math.floor(x0 * w / p), c1 = Math.min(cols - 1, Math.floor((x1 * w - 1e-6) / p));
+    const r0 = Math.floor(y0 * h / p), r1 = Math.min(rows - 1, Math.floor((y1 * h - 1e-6) / p));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) out.add(`${r},${c}`);
+  });
+  return [...out].map(s => s.split(",").map(Number));
+}
+
+function exportLabels() {
+  const annotator = document.getElementById("annotator").value.trim();
+  if (!annotator) { alert("Please enter your name at the top first."); return; }
+  const out = { annotator, exported: new Date().toISOString(), videos: ITEMS.length, labels: [] };
+  ITEMS.forEach(item => {
+    const e = labels[item.id]; if (!e) return;
+    const cells = {}; e.needed.forEach(t => { cells[t] = cellsFor(item, e.boxes[t] || []); });
+    out.labels.push({ id: item.id, category: item.category, video: item.video, grid: item.grid,
+      frame_size: item.frame_size, needed_steps: e.needed, boxes: e.boxes, cells, unsure: !!e.unsure,
+      note: e.note || "", updated: e.updated || null, done: isDone(item) });
+  });
+  const blob = new Blob([JSON.stringify(out, null, 1)], {type: "application/json"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+  a.download = `labels_${annotator.replace(/\W+/g, "_").toLowerCase()}.json`; a.click();
+}
+
+function importLabels(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try { const data = JSON.parse(reader.result);
+      (data.labels || []).forEach(l => { labels[l.id] = { needed: l.needed_steps || [], boxes: l.boxes || {},
+        unsure: !!l.unsure, note: l.note || "", updated: l.updated }; });
+      if (data.annotator && !document.getElementById("annotator").value) document.getElementById("annotator").value = data.annotator;
+      save(); render(); }
+    catch (err) { alert("That file is not a labels file from this page."); }
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById("prev").onclick = () => { if (index > 0) { index--; save(); render(); window.scrollTo(0, 0); } };
+document.getElementById("next").onclick = () => { if (index < ITEMS.length - 1) { index++; save(); render(); window.scrollTo(0, 0); } };
+document.getElementById("toggle-answer").onclick = () => { showAnswer = !showAnswer; render(); };
+document.getElementById("unsure").onchange = ev => { entry(ITEMS[index]).unsure = ev.target.checked; touch(ITEMS[index]); };
+document.getElementById("note").oninput = ev => { entry(ITEMS[index]).note = ev.target.value; touch(ITEMS[index]); };
+document.getElementById("annotator").oninput = save;
+document.getElementById("download").onclick = exportLabels;
+document.getElementById("load").onchange = ev => { if (ev.target.files[0]) importLabels(ev.target.files[0]); ev.target.value = ""; };
+document.addEventListener("keydown", ev => {
+  if (["INPUT", "TEXTAREA"].includes(document.activeElement.tagName)) return;
+  if (ev.key === "ArrowRight") document.getElementById("next").click();
+  if (ev.key === "ArrowLeft") document.getElementById("prev").click();
+});
+load(); render();
+</script>
+</body>
+</html>
