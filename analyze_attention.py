@@ -5,6 +5,7 @@ Everything uses the attention of the first generated token, which is the answer 
 Writes to <run-dir>/analysis/:
     per_video.csv         one row per video: where its attention went
     per_pair.csv          one row per original/twin pair: how the attention compares
+    accuracy.csv          accuracy and pair accuracy per category and overall
     summary.txt           the tables printed on screen
     temporal_profile.png  where in the video the model looks, right vs wrong answers
     vision_share_by_layer.png  how much attention the video gets in each layer
@@ -89,6 +90,22 @@ def load_videos(run_dir, layers):
             "time_profile_binned": rebin(time_profile),
         }
     return videos
+
+
+def accuracy_rows(videos):
+    """Accuracy and DyBench pair accuracy (original and twin both right), per category and overall."""
+    rows = []
+    for category in CATEGORIES:
+        correct = {v["video"]: v["correct"] for v in videos.values() if v["category"] == category}
+        twins = [(name, name.replace(".mp4", "_reversed.mp4")) for name in correct]
+        pairs = [correct[a] and correct[b] for a, b in twins if b != a and b in correct]
+        rows.append({"category": category, "videos": len(correct), "correct": sum(correct.values()),
+                     "pairs": len(pairs), "pairs_correct": sum(pairs)})
+    rows.append({"category": "overall", **{k: sum(r[k] for r in rows) for k in ("videos", "correct", "pairs", "pairs_correct")}})
+    for row in rows:
+        row["accuracy"] = row["correct"] / row["videos"] if row["videos"] else float("nan")
+        row["pair_accuracy"] = row["pairs_correct"] / row["pairs"] if row["pairs"] else float("nan")
+    return rows
 
 
 def build_pairs(videos, pair_types):
@@ -239,7 +256,15 @@ def write_csv(path, rows, columns):
 
 
 def summary_lines(videos, pairs):
-    lines = ["Per video (first generated token)", ""]
+    lines = ["Accuracy", ""]
+    lines.append(f"{'category':<22}{'accuracy':>22}{'pair accuracy':>24}")
+    for row in accuracy_rows(videos):
+        lines.append(
+            f"{row['category']:<22}"
+            f"{row['correct']:>6} / {row['videos']:<5}{100 * row['accuracy']:>6.1f}%"
+            f"{row['pairs_correct']:>8} / {row['pairs']:<5}{100 * row['pair_accuracy']:>6.1f}%"
+        )
+    lines += ["", "Per video (first generated token)", ""]
     lines.append(f"{'category':<22}{'answers':<8}{'n':>6}{'on video':>10}{'time center':>13}{'time spread':>13}")
     for category in CATEGORIES:
         for label, flag in (("right", True), ("wrong", False)):
@@ -305,6 +330,8 @@ def main():
     out_dir.mkdir(exist_ok=True)
     write_csv(out_dir / "per_video.csv", videos.values(),
               ["category", "video", "correct", "response", "time_steps", "vision_share", "time_center", "time_spread"])
+    write_csv(out_dir / "accuracy.csv", accuracy_rows(videos),
+              ["category", "videos", "correct", "accuracy", "pairs", "pairs_correct", "pair_accuracy"])
     write_csv(out_dir / "per_pair.csv", pairs,
               ["category", "video", "twin_type", "outcome", "original_correct", "twin_correct", "same_position", "same_content"])
 

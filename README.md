@@ -46,6 +46,21 @@ per_frame = att.mean(0).sum((1, 2))    # attention on each time step, averaged o
 heatmap = att.mean(0)[per_frame.argmax()]  # spatial map of the most attended time step
 ```
 
+## Results
+
+Qwen3-VL-8B-Instruct on DyBench, run on 2026-10-11 with the default settings (2 frames per second, at most 32 frames and 3072 video tokens per video). Pair accuracy counts a pair only when the original and its twin are both answered correctly.
+
+| Category | Accuracy | Paper | Pair accuracy | Paper |
+|---|---|---|---|---|
+| Event sequence | 635 / 814 = 78.0% | 79.5% | 230 / 407 = 56.5% | 59.7% |
+| Moving direction | 439 / 1000 = 43.9% | 40.8% | 105 / 500 = 21.0% | 18.2% |
+| Reversible dynamics | 945 / 1200 = 78.8% | 83.3% | 378 / 600 = 63.0% | 70.8% |
+| Overall | 2019 / 3014 = 67.0% | 68.2% | 713 / 1507 = 47.3% | 50.4% |
+
+The paper columns are the Qwen3-VL-8B (base) rows of Tables 1 and 5 in [the DyBench paper](https://arxiv.org/abs/2605.21988). The paper evaluates with 32 uniformly sampled frames and the benchmark's own prompt, so the settings are not identical.
+
+`analyze_attention.py` writes these counts to `outputs/qwen3vl_8b/analysis/accuracy.csv`.
+
 ## Analysing attention
 
 ```bash
@@ -57,7 +72,7 @@ This reads `outputs/qwen3vl_8b/` and writes tables and charts to `outputs/qwen3v
 - `temporal_profile.png`: where in the video the attention falls, for right and wrong answers.
 - `vision_share_by_layer.png`: how much attention the video gets in each layer, as opposed to the text.
 - `pair_similarity.png`: for time-reversed pairs, whether the twin's attention sits at the same time steps as the original's (position) or on the same frames (content).
-- `per_video.csv`, `per_pair.csv`, `summary.txt`: the numbers behind the charts.
+- `accuracy.csv`, `per_video.csv`, `per_pair.csv`, `summary.txt`: the numbers behind the charts.
 
 `dybench_pair_types.json` records how each DyBench `_reversed` twin relates to its original, measured from the pixels. They are not all time reversals:
 
@@ -68,6 +83,19 @@ This reads `outputs/qwen3vl_8b/` and writes tables and charts to `outputs/qwen3v
 | Event sequence | 6 | 0 | 401 |
 
 The event sequence twins swap the order of the two clips instead of reversing the frames. The content-versus-position comparison only uses the time-reversed pairs.
+
+### Checking for attention sinks
+
+```bash
+python check_attention_sinks.py
+```
+
+This tests whether the start-of-video attention in `temporal_profile.png` comes from a few tokens that absorb attention whatever the video shows. It writes to `outputs/qwen3vl_8b/analysis/sinks/`:
+
+- `summary.txt`: how much of the video attention the top token and the top 1% of tokens hold, where the top token sits, and whether it stays put or moves when a video is reversed.
+- `temporal_profile_sinks.png`: graph 1 with and without each video's top 1% of tokens.
+- `top_share_by_layer.png`: the share held by the top 1% of tokens in each layer.
+- `per_video.csv`: the same measures for every video.
 
 ## OmniTrace
 
