@@ -111,6 +111,14 @@ This builds `outputs/labeling/index.html`, a page for marking which time steps a
 
 Labels save in the browser as you go. "Download labels" writes `labels_<name>.json`; keep these in `labels/`. Each label records the needed time steps, the boxes as fractions of the frame, and the token-grid cells the boxes cover. The `outputs/labeling` folder includes the videos, so it can be zipped and sent to a second labeller.
 
+To score the model's attention against the labels (on the machine with the attention files):
+
+```bash
+python score_attention.py labels/labels_peter.json
+```
+
+It writes `summary.txt`, `per_video.csv` and `auroc_by_layer.png` to `outputs/qwen3vl_8b/analysis/labels/`. AUROC measures how well attention ranks the marked tokens above the rest (0.5 is chance, 1 is perfect). Lift is the share of attention on marked tokens divided by the share of tokens marked (1 is an even spread). Both are reported with all tokens and with each video's sink tokens (top 1%) left out. Several labels files can be passed at once.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:
