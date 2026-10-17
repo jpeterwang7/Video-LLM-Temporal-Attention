@@ -97,6 +97,8 @@ This tests whether the start-of-video attention in `temporal_profile.png` comes 
 - `top_share_by_layer.png`: the share held by the top 1% of tokens in each layer.
 - `per_video.csv`: the same measures for every video.
 
+To redo the main analysis without each video's top 1% of tokens, run `python analyze_attention.py --drop-top 0.01`. Results go to `outputs/qwen3vl_8b/analysis_drop_top/`, leaving `analysis/` unchanged.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:

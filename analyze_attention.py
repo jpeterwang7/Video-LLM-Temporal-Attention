@@ -14,6 +14,7 @@ Writes to <run-dir>/analysis/:
 import argparse
 import csv
 import json
+import math
 from collections import defaultdict
 from pathlib import Path
 
@@ -61,7 +62,15 @@ def mean_ci(values):
     return float(values.mean()), float(half), len(values)
 
 
-def load_videos(run_dir, layers):
+def drop_top_tokens(attention, fraction):
+    """Zero the most-attended tokens (ranked on the mean over layers) in every layer."""
+    flat = attention.reshape(attention.shape[0], -1)
+    k = math.ceil(fraction * flat.shape[1])
+    flat[:, np.argsort(flat.mean(axis=0))[-k:]] = 0.0
+    return attention
+
+
+def load_videos(run_dir, layers, drop_top=0.0):
     videos = {}
     with open(run_dir / "results.jsonl") as f:
         rows = [json.loads(line) for line in f]
@@ -70,6 +79,8 @@ def load_videos(run_dir, layers):
             continue
         data = np.load(run_dir / row["attention_file"])
         attention = data["vision_attention"][0].astype(np.float64)  # [layers, T, H, W]
+        if drop_top > 0:
+            attention = drop_top_tokens(attention, drop_top)
         per_layer_share = attention.sum(axis=(1, 2, 3))
         time_profile = attention[layers].mean(axis=0).sum(axis=(1, 2))
         time_profile = time_profile / time_profile.sum()
@@ -315,6 +326,9 @@ def main():
     parser.add_argument("--run-dir", type=Path, default=Path("outputs/qwen3vl_8b"))
     parser.add_argument("--pair-types", type=Path, default=Path("dybench_pair_types.json"))
     parser.add_argument("--layers", default=":", help="Layers to average for the time profiles, as start:end (default all)")
+    parser.add_argument("--drop-top", type=float, default=0.0,
+                        help="Leave out each video's most-attended tokens, as a fraction (0.01 = top 1%%); "
+                             "results go to analysis_drop_top/ instead of analysis/")
     args = parser.parse_args()
 
     start, _, end = args.layers.partition(":")
@@ -322,11 +336,11 @@ def main():
 
     with open(args.pair_types) as f:
         pair_types = json.load(f)
-    videos = load_videos(args.run_dir, layers)
+    videos = load_videos(args.run_dir, layers, args.drop_top)
     pairs = build_pairs(videos, pair_types)
     print(f"Loaded {len(videos)} videos and {len(pairs)} pairs from {args.run_dir}")
 
-    out_dir = args.run_dir / "analysis"
+    out_dir = args.run_dir / ("analysis_drop_top" if args.drop_top > 0 else "analysis")
     out_dir.mkdir(exist_ok=True)
     write_csv(out_dir / "per_video.csv", videos.values(),
               ["category", "video", "correct", "response", "time_steps", "vision_share", "time_center", "time_spread"])
