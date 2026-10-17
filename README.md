@@ -117,7 +117,12 @@ To score the model's attention against the labels (on the machine with the atten
 python score_attention.py labels/labels_peter.json
 ```
 
-It writes `summary.txt`, `per_video.csv` and `auroc_by_layer.png` to `outputs/qwen3vl_8b/analysis/labels/`. AUROC measures how well attention ranks the marked tokens above the rest (0.5 is chance, 1 is perfect). Lift is the share of attention on marked tokens divided by the share of tokens marked (1 is an even spread). Both are reported with all tokens and with each video's sink tokens (top 1%) left out. A control scores each video's labels against the attention of up to 20 other videos with the same token grid: attention that only favours a part of the frame, such as the centre, scores as well there, so only alignment with the video's own content beats the control. Several labels files can be passed at once.
+It writes `summary.txt`, `per_video.csv`, `auroc_by_layer.png` (real attention against the control) and `lift_by_layer.png` (with and without sink tokens) to `outputs/qwen3vl_8b/analysis/labels/`. AUROC measures how well attention ranks the marked tokens above the rest (0.5 is chance, 1 is perfect). Lift is the share of attention on marked tokens divided by the share of tokens marked (1 is an even spread). Both are reported with all tokens and with each video's sink tokens (top 1%) left out. A control scores each video's labels against the attention of up to 20 other videos with the same token grid: attention that only favours a part of the frame, such as the centre, scores as well there, so only alignment with the video's own content beats the control. Several labels files can be passed at once.
+
+Two scripts draw the results for the labelled videos:
+
+- `python plot_label_scores.py` writes `per_video_scores.png`: one row per labelled video, with its AUROC next to the control, and its lift. It only needs `per_video.csv`.
+- `python show_label_attention.py labels/labels_peter.json` writes `attention_vs_labels.png`: the model's attention as a heat map on one frame of each labelled video, with the human boxes on top. Add `--layer 22` to show a single layer. It needs the attention files and the videos.
 
 ## OmniTrace
 

@@ -11,7 +11,7 @@ A control scores each video's labels against the attention of other videos with 
 grid. If attention simply favours some part of the frame where objects tend to be (such as the
 centre), the control scores as well as the real attention; only alignment with this video's
 content beats it.
-Writes to <run-dir>/analysis/labels/: summary.txt, per_video.csv, auroc_by_layer.png.
+Writes to <run-dir>/analysis/labels/: summary.txt, per_video.csv, auroc_by_layer.png, lift_by_layer.png.
 """
 import argparse
 import json
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 
-from analyze_attention import BLUE, MUTED, ORANGE, TITLES, finish, new_figure, write_csv
+from analyze_attention import BASELINE, BLUE, MUTED, ORANGE, TITLES, finish, new_figure, write_csv
 
 SINK_FRACTION = 0.01
 CONTROL_VIDEOS = 20
@@ -75,30 +75,43 @@ def mean_ci(values):
     return float(values.mean()), float(1.96 * values.std(ddof=1) / np.sqrt(len(values))), len(values)
 
 
-def plot_by_layer(rows, path):
+def layer_panels(rows, title, subtitle, series, ylabel, reference, path, ylim=None):
+    """series: (label, color, function from a row to its per-layer values)."""
     categories = [c for c in TITLES if any(r["category"] == c for r in rows)]
-    fig, axes = new_figure(
-        len(categories),
-        "Does attention land on what a person needs to see? AUROC per layer",
-        "AUROC of the answer token's attention against the labelled tokens: 0.5 is chance, 1 is perfect. "
-        "Mean over labelled videos.",
-    )
+    fig, axes = new_figure(len(categories), title, subtitle)
     for ax, category in zip(axes, categories):
         group = [r for r in rows if r["category"] == category]
-        layers = np.arange(1, len(group[0]["scores"]["all"]["layer_auroc"]) + 1)
-        for key, label, color in (("all", "All video tokens", BLUE), ("no_sink", "Sink tokens left out", ORANGE)):
-            curve = np.nanmean([r["scores"][key]["layer_auroc"] for r in group], axis=0)
-            ax.plot(layers, curve, color=color, linewidth=2, solid_capstyle="round", solid_joinstyle="round", label=label)
-        controls = [r["control"]["layer_auroc"] for r in group if r["control"] is not None]
-        if controls:
-            ax.plot(layers, np.nanmean(controls, axis=0), color=MUTED, linewidth=2, solid_capstyle="round",
-                    label="Control: other videos' attention")
-        ax.axhline(0.5, color=MUTED, linewidth=1)
+        for label, color, values in series:
+            curves = [values(r) for r in group if values(r) is not None]
+            if curves:
+                ax.plot(np.arange(1, len(curves[0]) + 1), np.nanmean(curves, axis=0), color=color, linewidth=2,
+                        solid_capstyle="round", solid_joinstyle="round", label=label)
+        ax.axhline(reference, color=BASELINE, linewidth=1)
         ax.set_title(f"{TITLES[category]}  (n = {len(group)})", fontsize=10, color="#52514e", loc="left")
-        ax.set_xlim(1, layers[-1])
+        ax.set_xlim(1, len(group[0]["scores"]["all"]["layer_auroc"]))
         ax.set_xlabel("Layer", fontsize=9.5, color="#52514e")
-    axes[0].set_ylabel("AUROC", fontsize=9.5, color="#52514e")
-    finish(fig, axes, path, ylim=(0.0, 1.0))
+    axes[0].set_ylabel(ylabel, fontsize=9.5, color="#52514e")
+    finish(fig, axes, path, ylim=ylim)
+
+
+def plot_by_layer(rows, out_dir):
+    layer_panels(
+        rows,
+        "Does attention land on what a person needs to see? AUROC per layer",
+        "Each video's own attention against its labels, and other videos' attention as a control. 0.5 is chance.",
+        [("This video's attention (sinks left out)", ORANGE, lambda r: r["scores"]["no_sink"]["layer_auroc"]),
+         ("Control: other videos' attention", MUTED,
+          lambda r: r["control"]["layer_auroc"] if r["control"] is not None else None)],
+        "AUROC", 0.5, out_dir / "auroc_by_layer.png", ylim=(0.0, 1.0),
+    )
+    layer_panels(
+        rows,
+        "How much attention the labelled tokens get, compared with an even spread",
+        "Lift = share of attention on labelled tokens / share of tokens labelled. 1 is an even spread.",
+        [("All video tokens", BLUE, lambda r: r["scores"]["all"]["layer_lift"]),
+         ("Sink tokens left out", ORANGE, lambda r: r["scores"]["no_sink"]["layer_lift"])],
+        "Lift", 1.0, out_dir / "lift_by_layer.png",
+    )
 
 
 def summary_lines(rows):
@@ -211,7 +224,7 @@ def main():
          "control_videos": r["control"]["videos"] if r["control"] else 0} for r in rows],
         ["annotator", "category", "video", "correct", "wrong_answer_flag", "marked_fraction", "auroc_all",
          "lift_all", "auroc_no_sink", "lift_no_sink", "sink_on_label", "auroc_control", "control_videos"])
-    plot_by_layer(rows, out_dir / "auroc_by_layer.png")
+    plot_by_layer(rows, out_dir)
     lines = summary_lines(rows)
     (out_dir / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n" + "\n".join(lines))
