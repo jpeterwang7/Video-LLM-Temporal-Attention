@@ -6,7 +6,7 @@ answer token's attention on that time step's squares (averaged over layers, or o
 --layer), and the labeller's boxes. Sink squares (each video's top 1%) are left out and the heat
 map is scaled within each frame, so it shows where in the frame attention goes.
 Runs where the attention files and DyBench videos are. Writes
-<run-dir>/analysis/labels/attention_vs_labels.png (or attention_vs_labels_layer<N>.png).
+<run-dir>/analysis/<out-name>/attention_vs_labels.png (or attention_vs_labels_layer<N>.png).
 """
 import argparse
 import json
@@ -33,6 +33,7 @@ def main():
     parser.add_argument("labels", type=Path)
     parser.add_argument("--run-dir", type=Path, default=Path("outputs/qwen3vl_8b"))
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
+    parser.add_argument("--out-name", default="labels", help="Output folder name under <run-dir>/analysis/")
     parser.add_argument("--layer", type=int, default=None, help="Show one layer (1-36) instead of the mean over layers")
     parser.add_argument("--fps", type=float, default=2.0)
     parser.add_argument("--max-frames", type=int, default=32)
@@ -101,7 +102,9 @@ def main():
 
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     name = f"attention_vs_labels_layer{args.layer}.png" if args.layer else "attention_vs_labels.png"
-    out = args.run_dir / "analysis" / "labels" / name
+    out_dir = args.run_dir / "analysis" / args.out_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / name
     fig.savefig(out, dpi=140, facecolor=SURFACE)
     print(f"Drew {len(labels)} videos to {out}")
 
