@@ -11,7 +11,11 @@ A control scores each video's labels against the attention of other videos with 
 grid. If attention simply favours some part of the frame where objects tend to be (such as the
 centre), the control scores as well as the real attention; only alignment with this video's
 content beats it.
-Writes to <run-dir>/analysis/labels/: summary.txt, per_video.csv, auroc_by_layer.png, lift_by_layer.png.
+Right against wrong answers: for pairs where the model answered one video right and its reversed
+twin wrong, both labelled, the right twin's score minus the wrong twin's. The two share their
+content, so a difference can't come from one video being easier.
+Writes to <run-dir>/analysis/<out-name>/ (default labels): summary.txt, per_video.csv,
+auroc_by_layer.png, lift_by_layer.png, right_vs_wrong_by_layer.png.
 """
 import argparse
 import json
@@ -114,6 +118,50 @@ def plot_by_layer(rows, out_dir):
     )
 
 
+def one_right_pairs(rows):
+    """(right row, wrong row) for each labelled pair the model answered one right, one wrong."""
+    by_video = {(r["annotator"], r["category"], r["video"]): r for r in rows}
+    pairs = []
+    for (annotator, category, video), row in by_video.items():
+        if video.endswith("_reversed.mp4"):
+            continue
+        twin = by_video.get((annotator, category, video.replace(".mp4", "_reversed.mp4")))
+        if twin is not None and row["correct"] != twin["correct"]:
+            pairs.append((row, twin) if row["correct"] else (twin, row))
+    return pairs
+
+
+def right_wrong_lines(rows, layer):
+    pairs = one_right_pairs(rows)
+    lines = ["Right against wrong answers (sinks left out)", ""]
+    right = [r for r in rows if r["correct"]]
+    wrong = [r for r in rows if not r["correct"]]
+    lines.append(f"{'':<44}{'right':>16}{'wrong':>16}")
+    for name, value in (("AUROC, mean over layers", lambda r: r["scores"]["no_sink"]["auroc"]),
+                        (f"AUROC, layer {layer}", lambda r: r["scores"]["no_sink"]["layer_auroc"][layer - 1]),
+                        ("lift, mean over layers", lambda r: r["scores"]["no_sink"]["lift"]),
+                        (f"lift, layer {layer}", lambda r: r["scores"]["no_sink"]["layer_lift"][layer - 1])):
+        a, b = mean_ci([value(r) for r in right]), mean_ci([value(r) for r in wrong])
+        lines.append(f"{'all labelled videos, ' + name:<44}{a[0]:>8.3f} +/- {a[1]:.3f}{b[0]:>8.3f} +/- {b[1]:.3f}")
+    lines.append(f"{'videos':<44}{len(right):>16}{len(wrong):>16}")
+    lines += ["", f"Within pairs answered one right, one wrong ({len(pairs)} pairs): right twin minus wrong twin", ""]
+    if pairs:
+        for name, value in (("AUROC, mean over layers", lambda r: r["scores"]["no_sink"]["auroc"]),
+                            (f"AUROC, layer {layer}", lambda r: r["scores"]["no_sink"]["layer_auroc"][layer - 1]),
+                            ("lift, mean over layers", lambda r: r["scores"]["no_sink"]["lift"]),
+                            (f"lift, layer {layer}", lambda r: r["scores"]["no_sink"]["layer_lift"][layer - 1])):
+            diffs = [value(a) - value(b) for a, b in pairs]
+            m, ci, n = mean_ci(diffs)
+            lines.append(f"{name:<44}{m:>8.3f} +/- {ci:.3f}   right higher in {sum(d > 0 for d in diffs)} of {n}")
+    lines += [
+        "",
+        "Within-pair differences compare the same content, so they are the cleaner test.",
+        f"Layer {layer} was chosen from the first 16 labelled videos; it is a fair test only on videos labelled later.",
+        "",
+    ]
+    return lines
+
+
 def summary_lines(rows):
     lines = ["Attention against human labels (first generated token, mean over layers)", ""]
     for key, title in (("all", "All video tokens"), ("no_sink", "Sink tokens (top 1%) left out")):
@@ -164,6 +212,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("labels", type=Path, nargs="+", help="labels_<name>.json files from the labelling page")
     parser.add_argument("--run-dir", type=Path, default=Path("outputs/qwen3vl_8b"))
+    parser.add_argument("--out-name", default="labels", help="Output folder name under <run-dir>/analysis/")
+    parser.add_argument("--layer", type=int, default=22, help="Layer to report on its own (default 22)")
     args = parser.parse_args()
 
     results = {}
@@ -212,7 +262,7 @@ def main():
                          "scores": score_video(attention, mask), "control": control(label, mask)})
     print(f"Scored {len(rows)} labelled videos from {len(args.labels)} file(s)")
 
-    out_dir = args.run_dir / "analysis" / "labels"
+    out_dir = args.run_dir / "analysis" / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     write_csv(out_dir / "per_video.csv", [
         {"annotator": r["annotator"], "category": r["category"], "video": r["video"], "correct": r["correct"],
@@ -225,7 +275,16 @@ def main():
         ["annotator", "category", "video", "correct", "wrong_answer_flag", "marked_fraction", "auroc_all",
          "lift_all", "auroc_no_sink", "lift_no_sink", "sink_on_label", "auroc_control", "control_videos"])
     plot_by_layer(rows, out_dir)
-    lines = summary_lines(rows)
+    layer_panels(
+        rows,
+        "Does attention on the labelled tokens differ between right and wrong answers? AUROC per layer",
+        "Each video's own attention against its labels, sinks left out, grouped by whether the model "
+        "answered it right. 0.5 is chance.",
+        [("Right answers", BLUE, lambda r: r["scores"]["no_sink"]["layer_auroc"] if r["correct"] else None),
+         ("Wrong answers", ORANGE, lambda r: r["scores"]["no_sink"]["layer_auroc"] if not r["correct"] else None)],
+        "AUROC", 0.5, out_dir / "right_vs_wrong_by_layer.png", ylim=(0.0, 1.0),
+    )
+    lines = summary_lines(rows) + [""] + right_wrong_lines(rows, args.layer)
     (out_dir / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n" + "\n".join(lines))
     print(f"\nFiles written to {out_dir}")

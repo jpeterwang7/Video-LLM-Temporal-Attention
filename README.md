@@ -109,6 +109,12 @@ python make_labeling_page.py
 
 This builds `outputs/labeling/index.html`, a page for marking which time steps a person needs to see to answer each question, and where in those frames. It shows each video's frames exactly as the model saw them. Open it by double-clicking; no server is needed. By default it picks 8 time-reversed pairs (16 videos), 2 for each combination of moving direction or reversible dynamics with both right or one right.
 
+The second round, built to compare right and wrong answers, picks pairs the model answered one right or both wrong and skips videos already labelled:
+
+```bash
+python make_labeling_page.py --groups one_right:7,both_wrong:3 --exclude labels/labels_peter.json --out-dir outputs/labeling_round2 --seed 1
+```
+
 Labels save in the browser as you go. "Download labels" writes `labels_<name>.json`; keep these in `labels/`. Each label records the needed time steps, the boxes as fractions of the frame, and the token-grid cells the boxes cover. The `outputs/labeling` folder includes the videos, so it can be zipped and sent to a second labeller.
 
 To score the model's attention against the labels (on the machine with the attention files):
@@ -117,7 +123,7 @@ To score the model's attention against the labels (on the machine with the atten
 python score_attention.py labels/labels_peter.json
 ```
 
-It writes `summary.txt`, `per_video.csv`, `auroc_by_layer.png` (real attention against the control) and `lift_by_layer.png` (with and without sink tokens) to `outputs/qwen3vl_8b/analysis/labels/`. AUROC measures how well attention ranks the marked tokens above the rest (0.5 is chance, 1 is perfect). Lift is the share of attention on marked tokens divided by the share of tokens marked (1 is an even spread). Both are reported with all tokens and with each video's sink tokens (top 1%) left out. A control scores each video's labels against the attention of up to 20 other videos with the same token grid: attention that only favours a part of the frame, such as the centre, scores as well there, so only alignment with the video's own content beats the control. Several labels files can be passed at once.
+It writes `summary.txt`, `per_video.csv`, `auroc_by_layer.png` (real attention against the control) and `lift_by_layer.png` (with and without sink tokens) to `outputs/qwen3vl_8b/analysis/labels/`. AUROC measures how well attention ranks the marked tokens above the rest (0.5 is chance, 1 is perfect). Lift is the share of attention on marked tokens divided by the share of tokens marked (1 is an even spread). Both are reported with all tokens and with each video's sink tokens (top 1%) left out. A control scores each video's labels against the attention of up to 20 other videos with the same token grid: attention that only favours a part of the frame, such as the centre, scores as well there, so only alignment with the video's own content beats the control. Several labels files can be passed at once. `--out-name` picks the output folder (default `labels`), so different label sets don't overwrite each other. The summary also compares right and wrong answers, overall and within pairs the model answered one right and one wrong, averaged over layers and for `--layer` (default 22); the chart is `right_vs_wrong_by_layer.png`.
 
 Two scripts draw the results for the labelled videos:
 

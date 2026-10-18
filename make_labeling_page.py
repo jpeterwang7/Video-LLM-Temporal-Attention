@@ -9,7 +9,8 @@ writes them to a JSON file. The folder is self-contained (videos included), so i
 and sent to a second labeller.
 
 By default it picks 8 time-reversed pairs (16 videos): 2 per combination of category (moving
-direction, reversible dynamics) and outcome (both right, one right).
+direction, reversible dynamics) and outcome (both right, one right). --groups sets how many pairs
+of each outcome to pick per category, and --exclude skips videos already in labels files.
 """
 import argparse
 import csv
@@ -23,19 +24,20 @@ import cv2
 from show_sink_tokens import PATCH, resized_size, sample_indices
 
 CATEGORIES = ["moving_direction", "reversible_dynamics"]
-OUTCOMES = ["both_right", "one_right"]
 TITLES = {"moving_direction": "Moving direction", "reversible_dynamics": "Reversible dynamics"}
 
 
-def pick_pairs(run_dir, per_group, seed):
+def pick_pairs(run_dir, groups, exclude, seed):
+    """groups: {outcome: pairs per category}; exclude: (category, video) already labelled."""
     with open(run_dir / "analysis" / "per_pair.csv") as f:
-        rows = [r for r in csv.DictReader(f) if r["twin_type"] == "time_reversed"]
+        rows = [r for r in csv.DictReader(f) if r["twin_type"] == "time_reversed"
+                and (r["category"], r["video"]) not in exclude]
     rng = random.Random(seed)
     picks = []
     for category in CATEGORIES:
-        for outcome in OUTCOMES:
+        for outcome, count in groups.items():
             group = sorted(r["video"] for r in rows if r["category"] == category and r["outcome"] == outcome)
-            picks += [(category, video) for video in rng.sample(group, per_group)]
+            picks += [(category, video) for video in rng.sample(group, count)]
     return picks
 
 
@@ -104,7 +106,10 @@ def main():
     parser.add_argument("--run-dir", type=Path, default=Path("outputs/qwen3vl_8b"))
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/labeling"))
-    parser.add_argument("--pairs-per-group", type=int, default=2)
+    parser.add_argument("--groups", default="both_right:2,one_right:2",
+                        help="Pairs per category for each outcome, e.g. one_right:7,both_wrong:3")
+    parser.add_argument("--exclude", type=Path, nargs="*", default=[],
+                        help="Labels files whose videos (and their twins) should not be picked again")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fps", type=float, default=2.0)
     parser.add_argument("--max-frames", type=int, default=32)
@@ -120,13 +125,19 @@ def main():
         shutil.rmtree(args.out_dir)
     args.out_dir.mkdir(parents=True)
     items = []
-    for category, name in pick_pairs(args.run_dir, args.pairs_per_group, args.seed):
+    groups = {g.split(":")[0]: int(g.split(":")[1]) for g in args.groups.split(",")}
+    exclude = set()
+    for path in args.exclude:
+        for label in json.load(open(path))["labels"]:
+            base = label["video"].replace("_reversed.mp4", ".mp4")
+            exclude.add((label["category"], base))
+    for category, name in pick_pairs(args.run_dir, groups, exclude, args.seed):
         for video in (name, name.replace(".mp4", "_reversed.mp4")):
             items.append(build_item(category, video, questions[(category, video)], args.data_dir, args.out_dir, args))
     items = order_apart(items, args.seed)
 
     template = (Path(__file__).parent / "labeling_page.html").read_text()
-    page = template.replace("__ITEMS__", json.dumps(items))
+    page = template.replace("__ITEMS__", json.dumps(items)).replace("__PAGE__", args.out_dir.name)
     (args.out_dir / "index.html").write_text(page)
     print(f"Wrote {len(items)} videos to {args.out_dir / 'index.html'}")
 

@@ -87,7 +87,9 @@
           <ol>
             <li>Watch the video, then read the question.</li>
             <li>Below, click every time step a person <b>needs</b> to see to answer. Leave out steps that only repeat what you already know.</li>
-            <li>For each step you picked, drag a box around the object or region that carries the answer. Several boxes are fine; mark the minimum, never background.</li>
+            <li>For each step you picked, drag a box around the object or region that carries the answer. You draw on the first frame of the step; the second frame is shown beside it. If the object moves between the two, make the box cover <b>both</b> positions. Several boxes are fine; mark the minimum, never background.</li>
+            <li>Box the object whose state changes plus whatever causes the change (for example the bottle and the hat), not hands unless the answer depends on them.</li>
+            <li>If the dataset's answer looks wrong, still label what is needed, and start the note with <code>WRONG ANSWER:</code>.</li>
             <li>If you can't tell what is needed, tick "Unsure" and say why.</li>
             <li>Label each video on its own, even when you recognise its reversed twin.</li>
           </ol>
@@ -101,7 +103,7 @@
     <div class="steps" id="steps"></div>
   </section>
   <section>
-    <h2>2. Where in each needed step? <span class="status">Drag on the frame to draw a box.</span></h2>
+    <h2>2. Where in each needed step? <span class="status">Drag on the frame to draw a box. If the object moves between the two frames, cover both positions.</span></h2>
     <div id="editors"></div>
   </section>
   <section>
@@ -114,7 +116,8 @@
 </main>
 <script>
 const ITEMS = __ITEMS__;
-const KEY = "attention-labels-v1";
+const PAGE = "__PAGE__";
+const KEY = "attention-labels-" + PAGE;
 let labels = {};
 let index = 0;
 let showAnswer = false;
@@ -238,7 +241,7 @@ function cellsFor(item, boxes) {
 function exportLabels() {
   const annotator = document.getElementById("annotator").value.trim();
   if (!annotator) { alert("Please enter your name at the top first."); return; }
-  const out = { annotator, exported: new Date().toISOString(), videos: ITEMS.length, labels: [] };
+  const out = { annotator, page: PAGE, exported: new Date().toISOString(), videos: ITEMS.length, labels: [] };
   ITEMS.forEach(item => {
     const e = labels[item.id]; if (!e) return;
     const cells = {}; e.needed.forEach(t => { cells[t] = cellsFor(item, e.boxes[t] || []); });
@@ -248,7 +251,7 @@ function exportLabels() {
   });
   const blob = new Blob([JSON.stringify(out, null, 1)], {type: "application/json"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
-  a.download = `labels_${annotator.replace(/\W+/g, "_").toLowerCase()}.json`; a.click();
+  a.download = `labels_${annotator.replace(/\W+/g, "_").toLowerCase()}_${PAGE}.json`; a.click();
 }
 
 function importLabels(file) {
