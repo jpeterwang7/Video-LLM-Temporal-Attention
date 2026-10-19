@@ -277,7 +277,7 @@ def main():
     plot_by_layer(rows, out_dir)
     layer_panels(
         rows,
-        "Does attention on the labelled tokens differ between right and wrong answers? AUROC per layer",
+        "Right against wrong answers: AUROC on the labelled tokens, per layer",
         "Each video's own attention against its labels, sinks left out, grouped by whether the model "
         "answered it right. 0.5 is chance.",
         [("Right answers", BLUE, lambda r: r["scores"]["no_sink"]["layer_auroc"] if r["correct"] else None),
