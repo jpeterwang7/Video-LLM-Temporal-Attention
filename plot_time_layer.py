@@ -13,6 +13,7 @@ Writes to <run-dir>/analysis/<out-name>/ (default time_layer).
 import argparse
 import json
 import math
+import textwrap
 from pathlib import Path
 
 import matplotlib
@@ -62,11 +63,12 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
     fig = plt.figure(figsize=(6.2 * len(groups), 10.5))
     fig.patch.set_facecolor(SURFACE)
     fig.text(0.02, 0.985, title, fontsize=14, fontweight="bold", color=INK, va="top")
-    fig.text(0.02, 0.957, subtitle, fontsize=10, color=INK_SECONDARY, va="top")
+    fig.text(0.02, 0.957, textwrap.fill(subtitle, 150), fontsize=10, color=INK_SECONDARY, va="top")
 
     maps = {name: np.nanmean(np.stack([v[key] for v in videos]), axis=0) for name, videos in groups.items()}
-    spread = max(np.nanmax(np.abs(m - 1)) for m in maps.values())
-    norm = TwoSlopeNorm(vmin=1 - spread, vcenter=1.0, vmax=1 + spread)
+    low = min(np.nanmin(m) for m in maps.values())
+    high = max(np.nanmax(m) for m in maps.values())
+    norm = TwoSlopeNorm(vmin=min(low, 0.95), vcenter=1.0, vmax=max(high, 1.05))
     centres = (np.arange(bins) + 0.5) / bins * 100
     edges = np.linspace(0, 100, bins + 1)
     tick_labels = [f"{edges[i]:.0f}–{edges[i + 1]:.0f}%" for i in range(bins)]
@@ -78,14 +80,15 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         ax3 = fig.add_subplot(2, len(groups), i + 1, projection="3d")
         X, Y = np.meshgrid(centres, layers)
         ax3.plot_surface(X, Y, m, facecolors=DIVERGING(norm(np.nan_to_num(m, nan=1.0))), shade=False,
-                         rstride=1, cstride=1, linewidth=0.2, edgecolor=(1, 1, 1, 0.35), antialiased=True)
+                         rstride=1, cstride=1, linewidth=0.3, edgecolor=(0.5, 0.5, 0.5, 0.25), antialiased=True)
         ax3.set_title(f"{name}  (n = {len(videos)})", fontsize=11, color=INK_SECONDARY, loc="left")
         ax3.set_xlabel("Relative time in video (%)", fontsize=9, color=INK_SECONDARY, labelpad=6)
         ax3.set_ylabel("Layer", fontsize=9, color=INK_SECONDARY, labelpad=6)
         ax3.set_zlabel(colour_label, fontsize=9, color=INK_SECONDARY, labelpad=4)
         ax3.set_xticks([0, 50, 100])
         ax3.tick_params(colors=MUTED, labelsize=8)
-        ax3.view_init(elev=28, azim=-58)
+        ax3.view_init(elev=24, azim=-112)
+        ax3.set_zlim(norm.vmin, norm.vmax)
         for axis in (ax3.xaxis, ax3.yaxis, ax3.zaxis):
             axis.set_pane_color((0.99, 0.99, 0.98, 1))
 
@@ -104,7 +107,7 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         bar.ax.tick_params(labelsize=8, colors=MUTED)
         bar.outline.set_visible(False)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
     fig.savefig(path, dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
@@ -134,6 +137,7 @@ def main():
             share, lift = time_layer_maps(attention, label_mask(label), args.bins)
             groups.setdefault(TITLES[label["category"]], []).append(
                 {"share": share, "lift": lift, "correct": bool(result["correct"])})
+    groups = {name: groups[name] for name in TITLES.values() if name in groups}
     total = sum(len(v) for v in groups.values())
     print(f"Loaded {total} labelled videos")
 

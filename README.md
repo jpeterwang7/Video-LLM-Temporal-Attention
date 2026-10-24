@@ -130,6 +130,42 @@ Two scripts draw the results for the labelled videos:
 - `python plot_label_scores.py` writes `per_video_scores.png`: one row per labelled video, with its AUROC next to the control, and its lift. It only needs `per_video.csv`.
 - `python show_label_attention.py labels/labels_peter.json` writes `attention_vs_labels.png`: the model's attention as a heat map on one frame of each labelled video, with the human boxes on top. Add `--layer 22` to show a single layer. It needs the attention files and the videos.
 
+### Attention over layers and time
+
+```bash
+python plot_time_layer.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
+```
+
+Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D surface and a heat map over layers (1-36) and relative time in the video (fifths, so videos of different lengths line up), with sink squares left out:
+
+- `when_each_layer_looks.png`: how each layer spreads its attention on the video across the timeline (1 = even).
+- `tracking_the_object.png`: attention on the labelled boxes at each moment, relative to the boxes' share of the frame (1 = no better than even).
+
+### Working on a laptop
+
+`python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.
+
+## Other models: VidLaDA (diffusion)
+
+To compare an autoregressive model (Qwen3-VL) with a diffusion one, attention is measured the way the TabAlign paper measured LLaDA: one forward pass over the video, the question and a masked answer canvas, reading each layer's attention (mean over heads) from the first masked answer position. `run_attention_vidlada.py` does this for [VidLaDA-8B](https://huggingface.co/ziHoHe/VidLaDA-8B) on the labelled videos. It feeds exactly the frames Qwen3-VL saw, sums pairs of frames into Qwen3-VL's time steps, and saves the same file layout, plus the labels converted to VidLaDA's 14x14 grid in `outputs/vidlada_8b/labels/`.
+
+VidLaDA needs older library versions, so it gets its own environment (about 25 GB of disk with the weights):
+
+```bash
+git clone https://github.com/ShareLab-SII/VidLaDA.git ~/VidLaDA
+python3 -m venv .venv-vidlada
+source .venv-vidlada/bin/activate
+pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+pip install transformers==4.43.4 tokenizers==0.19.1 accelerate==0.29.1 "numpy<2" opencv-python-headless einops sentencepiece protobuf
+python run_attention_vidlada.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
+```
+
+Then, back in the main environment (`source .venv/bin/activate`), the usual analyses run on it with `--run-dir outputs/vidlada_8b` and the converted labels, for example:
+
+```bash
+python plot_time_layer.py outputs/vidlada_8b/labels/labels_peter.json outputs/vidlada_8b/labels/labels_peter_labeling_round2.json --run-dir outputs/vidlada_8b
+```
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:
