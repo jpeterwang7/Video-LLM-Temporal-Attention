@@ -18,11 +18,14 @@ import argparse
 import copy
 import json
 import math
+import os
 import re
 import sys
 import time
 import traceback
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import cv2
 import numpy as np
@@ -69,6 +72,24 @@ def parse_letter(response, candidates):
         if candidate.lower() in response.lower():
             return LETTERS[i]
     return None
+
+
+def decode_answer(model, backbone, canvas, prompt_len, gen_length, eot_id):
+    """VidLaDA's own decoding for short answers (one block, one token fixed per step, lowest-confidence
+    remasking, temperature 0), but scoring only the answer slots instead of the whole sequence."""
+    canvas = canvas.clone()
+    ids = [MASK_ID] * gen_length
+    for _ in range(gen_length):
+        hidden = backbone(inputs_embeds=canvas)[0][:, prompt_len:prompt_len + gen_length]
+        probs = torch.softmax(model.lm_head(hidden).float(), dim=-1)[0]   # [gen_length, vocab]
+        confidence, tokens = probs.max(dim=-1)
+        open_slots = [i for i in range(gen_length) if ids[i] == MASK_ID]
+        slot = max(open_slots, key=lambda i: confidence[i].item())
+        ids[slot] = int(tokens[slot])
+        canvas[:, prompt_len + slot] = backbone.embed_tokens(tokens[slot:slot + 1])[0]
+    if eot_id in ids:
+        ids = ids[:ids.index(eot_id)]
+    return ids
 
 
 def convert_label(label, rows, cols):
@@ -169,6 +190,7 @@ def main():
     backbone = model.get_model()
     recorder = AnswerRowRecorder(backbone.layers)
     per_frame = rows_per_frame * (cols_per_frame + 1)  # one end-of-row token per row
+    eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
     print(f"Model loaded: {len(backbone.layers)} layers")
 
     for n, (category, video) in enumerate(todo, start=1):
@@ -200,12 +222,9 @@ def main():
                 backbone(inputs_embeds=canvas)
                 recorder.active = False
                 rows = torch.stack(recorder.rows).numpy()                          # [layers, sequence]
-
-                answer_ids = model.generate(input_ids, attention_mask=attention_mask, images=[pixels], modalities=["video"],
-                                            steps=args.gen_length, gen_length=args.gen_length, block_length=args.gen_length,
-                                            temperature=0, cfg_scale=0.0, remasking="low_confidence", tokenizer=tokenizer,
-                                            stopping_criteria=[conv.sep], use_cache=False)
-            response = tokenizer.batch_decode(answer_ids, skip_special_tokens=True)[0].strip()
+                answer_ids = decode_answer(model, backbone, canvas, prompt_len, args.gen_length, eot_id)
+            response = tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
+            del embeds, canvas, pixels
 
             video_rows = rows[:, video_start:video_start + video_len]
             grid = video_rows.reshape(rows.shape[0], len(frames), rows_per_frame, cols_per_frame + 1)[..., :cols_per_frame]
@@ -225,6 +244,7 @@ def main():
             row["error"] = f"{type(e).__name__}: {e}"
             traceback.print_exc()
             torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
         row["seconds"] = round(time.time() - start, 2)
         with open(results_path, "a") as f:
             f.write(json.dumps(row) + "\n")
