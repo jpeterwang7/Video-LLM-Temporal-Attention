@@ -5,3 +5,4 @@ outputs/
 __pycache__/
 *.egg-info/
 .venv-vidlada/
+.venv-dynin/

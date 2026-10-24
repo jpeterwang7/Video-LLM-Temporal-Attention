@@ -166,6 +166,43 @@ Then, back in the main environment (`source .venv/bin/activate`), the usual anal
 python plot_time_layer.py outputs/vidlada_8b/labels/labels_peter.json outputs/vidlada_8b/labels/labels_peter_labeling_round2.json --run-dir outputs/vidlada_8b
 ```
 
+## Other models: LLaVA-Video (autoregressive) and Dynin-Omni (diffusion)
+
+`run_attention_llava_video.py` runs [LLaVA-Video-7B-Qwen2](https://huggingface.co/lmms-lab/LLaVA-Video-7B-Qwen2), the autoregressive counterpart of VidLaDA. Both are built from the LLaVA-NeXT code, with the same SigLIP vision encoder, the same 14x14 grid per frame and the same token layout, so they differ mainly in the language model: Qwen2-7B reading left to right against LLaDA-8B's diffusion. Attention is taken from the last prompt position (the one that emits the answer), as for Qwen3-VL, on exactly the frames Qwen3-VL saw. It runs in the VidLaDA environment (about 17 GB more disk for the weights):
+
+```bash
+git clone https://github.com/LLaVA-VL/LLaVA-NeXT.git ~/LLaVA-NeXT
+source .venv-vidlada/bin/activate
+python run_attention_llava_video.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
+```
+
+`run_attention_dynin.py` runs [Dynin-Omni](https://huggingface.co/snu-aidas/Dynin-Omni), a second diffusion model. Unlike VidLaDA it has no vision encoder: each frame becomes discrete image tokens in the same vocabulary as the text. It was trained on 5 frames per video, centre-cropped to 224x224 (14x14 tokens each), and is run that way: the 5 frames are picked evenly from the frames Qwen3-VL saw, and the labels are moved onto those frames and into the crop in `outputs/dynin_omni/labels/`. Attention is read as for VidLaDA. It needs its own environment (about 17 GB of disk with the weights):
+
+```bash
+git clone https://github.com/AIDASLab/Dynin-Omni.git ~/Dynin-Omni
+python3 -m venv .venv-dynin
+source .venv-dynin/bin/activate
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+pip install transformers==4.47.1 tokenizers==0.21.2 diffusers==0.32.2 accelerate einops jaxtyping typeguard omegaconf python-dotenv opencv-python-headless sentencepiece protobuf safetensors "numpy<2"
+python run_attention_dynin.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
+```
+
+Both scripts read attention with `attention_rows.py`, which wraps PyTorch's attention function and recomputes the attention row of one position in every layer.
+
+### Comparing models
+
+`compare_models.py` compares models on the labelled videos they share, the way TabAlign compared autoregressive and diffusion models: per-video AUROC against the labels on the mean of the last 4 layers (TabAlign's convention) and of all layers, paired Wilcoxon tests between every pair of models, the share of attention on the video, how much of it the top 1% of tokens hold, and whether each model's lean toward the start or end of the clip flips when a video is reversed. It writes `outputs/model_comparison/summary.txt` and `auroc_by_depth.png`.
+
+```bash
+python compare_models.py \
+  --model "Qwen3-VL-8B (autoregressive)" outputs/qwen3vl_8b labels/labels_peter.json labels/labels_peter_labeling_round2.json \
+  --model "VidLaDA-8B (diffusion)" outputs/vidlada_8b outputs/vidlada_8b/labels/labels_peter.json outputs/vidlada_8b/labels/labels_peter_labeling_round2.json \
+  --model "LLaVA-Video-7B (autoregressive)" outputs/llava_video_7b outputs/llava_video_7b/labels/labels_peter.json outputs/llava_video_7b/labels/labels_peter_labeling_round2.json \
+  --model "Dynin-Omni-8B (diffusion)" outputs/dynin_omni outputs/dynin_omni/labels/labels_peter.json outputs/dynin_omni/labels/labels_peter_labeling_round2.json
+```
+
+Every pair of models is compared on the videos they share.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:

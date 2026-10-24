@@ -96,7 +96,7 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         image = ax2.imshow(m, aspect="auto", origin="lower", cmap=DIVERGING, norm=norm,
                            extent=(0, 100, 0.5, m.shape[0] + 0.5), interpolation="nearest")
         ax2.set_xticks(centres, tick_labels, fontsize=8, color=MUTED)
-        ax2.set_yticks([1, 6, 12, 18, 22, 28, 36])
+        ax2.set_yticks(sorted({1, *range(6, m.shape[0], 6), m.shape[0]}))
         ax2.tick_params(colors=MUTED, labelsize=8, length=0)
         ax2.set_xlabel("Relative time in video", fontsize=9, color=INK_SECONDARY)
         ax2.set_ylabel("Layer", fontsize=9, color=INK_SECONDARY)
