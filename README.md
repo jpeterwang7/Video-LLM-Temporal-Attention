@@ -166,7 +166,7 @@ Then, back in the main environment (`source .venv/bin/activate`), the usual anal
 python plot_time_layer.py outputs/vidlada_8b/labels/labels_peter.json outputs/vidlada_8b/labels/labels_peter_labeling_round2.json --run-dir outputs/vidlada_8b
 ```
 
-## Other models: LLaVA-Video (autoregressive) and Dynin-Omni (diffusion)
+## Other models: LLaVA-Video (autoregressive), Dynin-Omni and Dream-VL (diffusion)
 
 `run_attention_llava_video.py` runs [LLaVA-Video-7B-Qwen2](https://huggingface.co/lmms-lab/LLaVA-Video-7B-Qwen2), the autoregressive counterpart of VidLaDA. Both are built from the LLaVA-NeXT code, with the same SigLIP vision encoder, the same 14x14 grid per frame and the same token layout, so they differ mainly in the language model: Qwen2-7B reading left to right against LLaDA-8B's diffusion. Attention is taken from the last prompt position (the one that emits the answer), as for Qwen3-VL, on exactly the frames Qwen3-VL saw. It runs in the VidLaDA environment (about 17 GB more disk for the weights):
 
@@ -187,7 +187,17 @@ pip install transformers==4.47.1 tokenizers==0.21.2 diffusers==0.32.2 accelerate
 python run_attention_dynin.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
 ```
 
-Both scripts read attention with `attention_rows.py`, which wraps PyTorch's attention function and recomputes the attention row of one position in every layer.
+`run_attention_dreamvl.py` runs [Dream-VL-7B](https://huggingface.co/Dream-org/Dream-VL-7B), a third diffusion model from a different family: its language model is Dream-7B (initialised from Qwen2.5-7B) and its vision encoder is Qwen2-VL's. Like Qwen3-VL it merges each pair of frames into one time step, so each of Qwen3-VL's frames is resized to give exactly Qwen3-VL's grid of squares (28x28 pixels each instead of 32x32), and the original labels files apply unchanged. Dream predicts each token from the position before it, so attention is read from the last prompt position, which here also sees the masked answer canvas after it. The answer is decoded with Dream-VL's own `diffusion_generate` (3 tokens, 1 step, its multiple-choice setting). It needs its own environment (about 17 GB of disk with the weights). Its current processor code needs transformers 4.52 or later:
+
+```bash
+python3 -m venv .venv-dreamvl
+source .venv-dreamvl/bin/activate
+pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu128
+pip install transformers==4.52.4 accelerate "numpy<2" opencv-python-headless pillow regex
+python run_attention_dreamvl.py labels/labels_peter.json labels/labels_peter_labeling_round2.json
+```
+
+These scripts read attention with `attention_rows.py`, which wraps PyTorch's attention function and recomputes the attention row of one position in every layer.
 
 ### Comparing models
 
@@ -198,7 +208,8 @@ python compare_models.py \
   --model "Qwen3-VL-8B (autoregressive)" outputs/qwen3vl_8b labels/labels_peter.json labels/labels_peter_labeling_round2.json \
   --model "VidLaDA-8B (diffusion)" outputs/vidlada_8b outputs/vidlada_8b/labels/labels_peter.json outputs/vidlada_8b/labels/labels_peter_labeling_round2.json \
   --model "LLaVA-Video-7B (autoregressive)" outputs/llava_video_7b outputs/llava_video_7b/labels/labels_peter.json outputs/llava_video_7b/labels/labels_peter_labeling_round2.json \
-  --model "Dynin-Omni-8B (diffusion)" outputs/dynin_omni outputs/dynin_omni/labels/labels_peter.json outputs/dynin_omni/labels/labels_peter_labeling_round2.json
+  --model "Dynin-Omni-8B (diffusion)" outputs/dynin_omni outputs/dynin_omni/labels/labels_peter.json outputs/dynin_omni/labels/labels_peter_labeling_round2.json \
+  --model "Dream-VL-7B (diffusion)" outputs/dreamvl_7b labels/labels_peter.json labels/labels_peter_labeling_round2.json
 ```
 
 Every pair of models is compared on the videos they share.

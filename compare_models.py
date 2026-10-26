@@ -29,7 +29,7 @@ from scipy.stats import wilcoxon
 from analyze_attention import BLUE, MUTED, ORANGE, TITLES, finish, new_figure
 from score_attention import SINK_FRACTION, auroc, label_mask, mean_ci
 
-COLOURS = [BLUE, ORANGE, "#1baf7a", "#9b59d0"]
+COLOURS = [BLUE, ORANGE, "#1baf7a", "#9b59d0", "#d6457a"]
 
 
 def video_scores(attention, mask):
