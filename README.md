@@ -214,6 +214,10 @@ python compare_models.py \
 
 Every pair of models is compared on the videos they share.
 
+### Steering attention onto the object
+
+`steer_attention.py` tests whether attention is a lever on the answer. At the position that emits the answer, every layer's attention to the labelled squares is multiplied by e^bias (biases 1, 2, 4 and 8) and the row renormalised; nothing else changes. As a control, the same boost goes to as many random unlabelled squares from the same time steps. The answer is read in one forward pass from that position's scores for the option letters. The steering itself is `SdpaSteerer` in `attention_rows.py`. `./run_steering.sh` runs all five models, each in its own environment, and writes `outputs/steering/<model>/results.jsonl`. `python summarize_steering.py` then writes `outputs/steering/summary.txt` (accuracy, probability of the correct letter, object versus random with Wilcoxon tests, answers flipped, and the attention share the object reached) and `p_correct_by_bias.png`.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:

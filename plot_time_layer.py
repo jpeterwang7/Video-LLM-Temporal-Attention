@@ -8,7 +8,8 @@ Time is relative: each video's time steps are placed by where they fall in the v
                                relative to an even spread over time (1 = even)
     tracking_the_object.png    attention on the boxed squares at each moment, relative to the
                                boxes' share of the frame at that moment (1 = no better than even)
-Writes to <run-dir>/analysis/<out-name>/ (default time_layer).
+Writes to <run-dir>/analysis/<out-name>/ (default time_layer). Titles name the model, taken from the run
+directory (or --model-name).
 """
 import argparse
 import json
@@ -28,6 +29,15 @@ from score_attention import SINK_FRACTION, label_mask
 
 # Diverging around 1 (= an even spread): blue below, red above, neutral grey at 1
 DIVERGING = LinearSegmentedColormap.from_list("even", ["#2a78d6", "#f0efec", "#e34948"])
+
+# Run directory name -> (title name, note for the subtitle)
+MODELS = {
+    "qwen3vl_8b": ("Qwen3-VL-8B (autoregressive)", ""),
+    "llava_video_7b": ("LLaVA-Video-7B (autoregressive)", ""),
+    "vidlada_8b": ("VidLaDA-8B (diffusion)", ""),
+    "dynin_omni": ("Dynin-Omni-8B (diffusion)", " Dynin-Omni sees 5 centre-cropped frames, so each fifth is one frame."),
+    "dreamvl_7b": ("Dream-VL-7B (diffusion)", ""),
+}
 
 
 def time_layer_maps(attention, mask, bins):
@@ -118,6 +128,7 @@ def main():
     parser.add_argument("--run-dir", type=Path, default=Path("outputs/qwen3vl_8b"))
     parser.add_argument("--out-name", default="time_layer")
     parser.add_argument("--bins", type=int, default=5, help="Relative-time bins (default 5: fifths of the video)")
+    parser.add_argument("--model-name", help="Model name for the titles (default: from the run directory)")
     args = parser.parse_args()
 
     results = {}
@@ -143,15 +154,19 @@ def main():
 
     out_dir = args.run_dir / "analysis" / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    name, note = MODELS.get(args.run_dir.name, (args.run_dir.name, ""))
+    name = args.model_name or name
     draw(groups, "share",
-         "When each layer looks: attention over relative time and layers",
-         f"Share of each layer's attention on the video falling in each 1/{args.bins} of the video, relative to an "
-         f"even spread over time (1 = even; red = more, blue = less). Sinks left out. Labelled videos.",
+         f"{name}: when each layer looks",
+         f"Attention over relative time and layers: the share of each layer's attention on the video that falls in "
+         f"each 1/{args.bins} of the video, relative to an even spread over time (1 = even; red = more, blue = less). "
+         f"Sinks left out. {total} labelled videos.{note}",
          "Relative to even", out_dir / "when_each_layer_looks.png", args.bins)
     draw(groups, "lift",
-         "Tracking the labelled object: attention on the boxes over relative time and layers",
-         "Attention on the boxed squares at each moment, relative to the boxes' share of the frame then "
-         "(1 = no better than even; red = more, blue = less). Sinks left out. Labelled videos.",
+         f"{name}: tracking the labelled object",
+         f"Attention on the labelled boxes over relative time and layers, relative to the boxes' share of the frame "
+         f"at that moment (1 = no better than even; red = more, blue = less). Sinks left out. {total} labelled "
+         f"videos.{note}",
          "Lift on boxes", out_dir / "tracking_the_object.png", args.bins)
     print(f"Files written to {out_dir}")
 

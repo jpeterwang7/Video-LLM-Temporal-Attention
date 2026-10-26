@@ -173,9 +173,10 @@ def finish(fig, axes, path, ylim=None):
         ylim = (0, axes[0].get_ylim()[1] * 1.08)
     axes[0].set_ylim(*ylim)
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower left", bbox_to_anchor=(0.02, 0.0), ncol=len(labels),
+    legend_rows = -(-len(labels) // 3)  # at most 3 entries per row
+    fig.legend(handles, labels, loc="lower left", bbox_to_anchor=(0.02, 0.0), ncol=min(len(labels), 3),
                frameon=False, fontsize=9.5, labelcolor=INK_SECONDARY)
-    fig.tight_layout(rect=(0, 0.06, 1, 0.86))
+    fig.tight_layout(rect=(0, 0.06 * legend_rows, 1, 0.86))
     fig.savefig(path, dpi=200, facecolor=SURFACE)
     plt.close(fig)
 
