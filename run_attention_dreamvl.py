@@ -45,7 +45,7 @@ def decode_answer(model, embeds, position_ids, prompt_len, length, steps, mask_i
         hidden = model.model(inputs_embeds=embeds, position_ids=position_ids, use_cache=False)[0]
         logits = model.lm_head(hidden[:, prompt_len - 1:prompt_len - 1 + length])[0]
         confidence, tokens = torch.softmax(logits, dim=-1).max(dim=-1)
-        open_slots = torch.tensor([j for j in range(length) if ids[j] == mask_id])
+        open_slots = torch.tensor([j for j in range(length) if ids[j] == mask_id], device=confidence.device)
         t, s = timesteps[i], timesteps[i + 1]
         count = int(len(open_slots) * (1 - s / t)) if i < steps - 1 else len(open_slots)
         if count > 0:
