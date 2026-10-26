@@ -10,8 +10,9 @@ frames, time steps and token grid, and the labels apply unchanged.
 Following TabAlign, one forward pass over [video + question + masked answer canvas] gives each layer's
 attention (mean over heads) from the position that emits the first answer token. Dream keeps Qwen2.5's shift
 (the token at position i is predicted from position i-1), so that is the last prompt position, which here
-attends to the whole canvas in both directions. The answer is decoded with Dream-VL's own diffusion_generate,
-using its multiple-choice setting (3 tokens, 1 step).
+attends to the whole canvas in both directions. The answer is decoded the way Dream-VL's own diffusion_generate
+does it, with its multiple-choice setting (3 tokens, 1 step), but scoring only the answer slots: the original
+scores every position against the whole vocabulary, which runs out of GPU memory on the longer videos.
 
 Writes <out-dir>/results.jsonl and <out-dir>/<category>/<video>.npz (vision_attention [1, layers, T, H, W],
 same layout as run_attention.py), so score_attention.py, plot_time_layer.py and compare_models.py run on it
@@ -32,6 +33,26 @@ from attention_rows import SdpaRowRecorder
 from run_attention_vidlada import LETTERS, build_prompt, parse_letter, sample_frames
 
 SQUARE = 28  # pixels per video token side: 14px patches merged 2x2
+
+
+def decode_answer(model, embeds, position_ids, prompt_len, length, steps, mask_id, eps=1e-3):
+    """Dream-VL's diffusion_generate for one sequence (alg maskgit_plus, temperature 0, no EOS penalty), scoring
+    only the answer slots. As in Dream, the token at position i is read from position i-1's output."""
+    embeds = embeds.clone()
+    ids = [mask_id] * length
+    timesteps = torch.linspace(1, eps, steps + 1)
+    for i in range(steps):
+        hidden = model.model(inputs_embeds=embeds, position_ids=position_ids, use_cache=False)[0]
+        logits = model.lm_head(hidden[:, prompt_len - 1:prompt_len - 1 + length])[0]
+        confidence, tokens = torch.softmax(logits, dim=-1).max(dim=-1)
+        open_slots = torch.tensor([j for j in range(length) if ids[j] == mask_id])
+        t, s = timesteps[i], timesteps[i + 1]
+        count = int(len(open_slots) * (1 - s / t)) if i < steps - 1 else len(open_slots)
+        if count > 0:
+            for j in open_slots[torch.topk(confidence[open_slots], count).indices].tolist():
+                ids[j] = int(tokens[j])
+                embeds[:, prompt_len + j] = model.get_input_embeddings()(tokens[j:j + 1])[0]
+    return ids
 
 
 def main():
@@ -76,7 +97,8 @@ def main():
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True, min_pixels=SQUARE * SQUARE,
                                               max_pixels=SQUARE * SQUARE * 100000)
     layers = len(model.model.layers)
-    mask_id, video_id, eos_id = model.config.mask_token_id, model.config.video_token_id, model.config.eos_token_id
+    mask_id, video_id = model.config.mask_token_id, model.config.video_token_id
+    stop_ids = {model.config.eos_token_id, processor.tokenizer.convert_tokens_to_ids("<|im_end|>")}
     recorder = SdpaRowRecorder()
     print(f"Model loaded: {layers} layers")
 
@@ -115,14 +137,9 @@ def main():
                 rows = torch.stack(recorder.rows).numpy()                          # [layers, sequence]
                 if rows.shape[0] != layers:
                     raise RuntimeError(f"Recorded {rows.shape[0]} attention calls for {layers} layers")
-                output = model.diffusion_generate(
-                    input_ids, attention_mask=inputs["attention_mask"], pixel_values_videos=inputs["pixel_values_videos"],
-                    video_grid_thw=grid_thw, max_new_tokens=args.max_new_tokens, steps=args.steps, temperature=0.0,
-                    top_p=1.0, alg="maskgit_plus", alg_temp=0, use_cache=False, output_history=False,
-                    return_dict_in_generate=True)
-            answer_ids = output.sequences[0, prompt_len:].tolist()
-            if eos_id in answer_ids:
-                answer_ids = answer_ids[:answer_ids.index(eos_id)]
+                answer_ids = decode_answer(model, embeds, position_ids, prompt_len, args.max_new_tokens, args.steps, mask_id)
+            stops = [i for i, token in enumerate(answer_ids) if token in stop_ids]
+            answer_ids = answer_ids[:stops[0]] if stops else answer_ids
             response = processor.tokenizer.decode(answer_ids, skip_special_tokens=True).strip()
 
             video_start = int(is_video[0].nonzero()[0])
