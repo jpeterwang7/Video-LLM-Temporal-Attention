@@ -14,7 +14,8 @@ remasking).
 Writes <out-dir>/results.jsonl and <out-dir>/<category>/<video>.npz (vision_attention
 [1, layers, 5, 14, 14], same layout as run_attention.py), plus the labels moved onto these 5 frames and the
 cropped 14x14 grid in <out-dir>/labels/ (boxes outside the crop are cut), so score_attention.py and
-plot_time_layer.py run on it unchanged.
+plot_time_layer.py run on it unchanged. With --all-videos it also runs every DyBench video, for accuracy on the
+whole benchmark; either way it ends by printing accuracy and pair accuracy over every finished video.
 
 Needs its own environment with the Dynin-Omni repository (see README).
 """
@@ -32,6 +33,7 @@ import torch
 from attention_rows import SdpaRowRecorder
 from run_attention_vidlada import LETTERS, MASK_ID, build_prompt, convert_label, parse_letter, sample_frames
 
+CATEGORIES = ["event_sequence", "moving_direction", "reversible_dynamics"]
 SPECIAL_TOKENS = ("<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>", "<|t2i|>", "<|mmu|>", "<|t2v|>", "<|v2v|>", "<|lvg|>",
                   "<|i2i|>", "<|ti2ti|>", "<|v2t|>", "<|v2s|>", "<|s2t|>", "<|t2s|>", "<|s2s|>", "<|soa|>", "<|eoa|>",
                   "<think>", "</think>")
@@ -76,9 +78,30 @@ def convert_label_dynin(label, picked, crop, rows, cols):
     return convert_label(moved, rows, cols), cut
 
 
+def summarize(results_path):
+    """Accuracy and DyBench pair accuracy (a video and its _reversed twin both right), per category and overall."""
+    rows = {}
+    for line in open(results_path):
+        row = json.loads(line)
+        if "error" not in row:
+            rows[(row["category"], row["video"])] = row
+    totals = np.zeros(4, dtype=int)
+    for category in [c for c in CATEGORIES if any(k[0] == c for k in rows)]:
+        correct = {v: r["correct"] for (c, v), r in rows.items() if c == category}
+        pairs = [correct[v] and correct[v.replace(".mp4", "_reversed.mp4")] for v in correct
+                 if not v.endswith("_reversed.mp4") and v.replace(".mp4", "_reversed.mp4") in correct]
+        counts = np.array([sum(correct.values()), len(correct), sum(pairs), len(pairs)])
+        totals += counts
+        print(f"{category:<22}{counts[0]:>5} / {counts[1]:<5} = {100 * counts[0] / counts[1]:5.1f}%   pairs "
+              f"{counts[2]:>4} / {counts[3]:<4} = {100 * counts[2] / max(counts[3], 1):5.1f}%")
+    print(f"{'overall':<22}{totals[0]:>5} / {totals[1]:<5} = {100 * totals[0] / totals[1]:5.1f}%   pairs "
+          f"{totals[2]:>4} / {totals[3]:<4} = {100 * totals[2] / max(totals[3], 1):5.1f}%")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
-    parser.add_argument("labels", type=Path, nargs="+", help="Labels files: which videos to run, and to convert")
+    parser.add_argument("labels", type=Path, nargs="*", help="Labels files: which videos to run, and to convert")
+    parser.add_argument("--all-videos", action="store_true", help="Also run every DyBench video (for accuracy)")
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
     parser.add_argument("--model", default="snu-aidas/Dynin-Omni")
     parser.add_argument("--vq-model", default="snu-aidas/magvitv2")
@@ -101,10 +124,13 @@ def main():
     for path in args.labels:
         data = json.load(open(path))
         labels[path.name] = data
-    wanted = sorted({(l["category"], l["video"]) for d in labels.values() for l in d["labels"]})
+    wanted = {(l["category"], l["video"]) for d in labels.values() for l in d["labels"]}
     questions = {}
-    for category in {c for c, _ in wanted}:
+    for category in CATEGORIES:
         questions.update({(category, q["video"]): q for q in json.load(open(args.data_dir / "json" / f"{category}.json"))})
+    if args.all_videos:
+        wanted |= set(questions)
+    wanted = sorted(wanted)
 
     def video_path(category, video):
         return args.data_dir / "video" / category / category / video
@@ -137,6 +163,10 @@ def main():
                 done.add((row["category"], row["video"]))
     todo = [k for k in wanted if k not in done]
     print(f"{len(wanted)} videos, {len(done)} already done, {len(todo)} to run")
+    if not todo:
+        if results_path.exists():
+            summarize(results_path)
+        return
 
     device = args.device
     tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left", trust_remote_code=True)
@@ -163,7 +193,7 @@ def main():
         start = time.time()
         try:
             frames, indices, native_fps = sample_frames(video_path(category, video))
-            if len(frames) != expected_frames[(category, video)]:
+            if (category, video) in expected_frames and len(frames) != expected_frames[(category, video)]:
                 raise RuntimeError(f"{len(frames)} frames read, but the label has {expected_frames[(category, video)]}")
             picked = pick_frames(len(frames), args.frames)
             pixels = torch.stack([image_transform(Image.fromarray(frames[p]), resolution=args.resolution)
@@ -211,7 +241,8 @@ def main():
         print(f"[{n}/{len(todo)}] {category}/{video}: {status} {row['seconds']}s "
               f"peak GPU {torch.cuda.max_memory_allocated() / 2**30:.1f} GB", flush=True)
 
-    print(f"Results: {results_path}\nConverted labels: {args.out_dir / 'labels'}")
+    print(f"Results: {results_path}\nConverted labels: {args.out_dir / 'labels'}\n")
+    summarize(results_path)
 
 
 if __name__ == "__main__":
