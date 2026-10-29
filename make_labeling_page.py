@@ -15,6 +15,7 @@ of each outcome to pick per category, and --exclude skips videos already in labe
 import argparse
 import csv
 import json
+import os
 import random
 import shutil
 from pathlib import Path
@@ -41,7 +42,9 @@ def pick_pairs(run_dir, groups, exclude, seed):
     return picks
 
 
-def build_item(category, name, question, data_dir, out_dir, args):
+def build_item(category, name, question, data_dir, out_dir, args, copy_video=True):
+    """Write a video's frames under out_dir and return its page item. copy_video=False links to the DyBench
+    copy instead of copying the video into the page folder."""
     src = data_dir / "video" / category / category / name
     cap = cv2.VideoCapture(str(src))
     native_fps, total = cap.get(cv2.CAP_PROP_FPS), int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -63,8 +66,9 @@ def build_item(category, name, question, data_dir, out_dir, args):
 
     stem = Path(name).stem
     (out_dir / "frames" / stem).mkdir(parents=True, exist_ok=True)
-    (out_dir / "videos").mkdir(exist_ok=True)
-    shutil.copy(src, out_dir / "videos" / name)
+    if copy_video:
+        (out_dir / "videos").mkdir(exist_ok=True)
+        shutil.copy(src, out_dir / "videos" / name)
     steps = []
     for t in range(len(indices) // 2):
         pair = []
@@ -79,7 +83,7 @@ def build_item(category, name, question, data_dir, out_dir, args):
         "category": category,
         "title": TITLES[category],
         "video": name,
-        "video_path": f"videos/{name}",
+        "video_path": f"videos/{name}" if copy_video else Path(os.path.relpath(src.resolve(), out_dir.resolve())).as_posix(),
         "question": question["question"],
         "candidates": question["candidates"],
         "answer": question["answer"],
@@ -88,6 +92,14 @@ def build_item(category, name, question, data_dir, out_dir, args):
         "patch": PATCH,
         "steps": steps,
     }
+
+
+def write_page(items, out_dir, prefill=None, review=False):
+    """index.html for these items. prefill: {video id: label} to start from; review: add an Approved tick."""
+    template = (Path(__file__).parent / "labeling_page.html").read_text()
+    page = (template.replace("__PREFILL__", json.dumps(prefill or {})).replace("__REVIEW__", json.dumps(review))
+            .replace("__ITEMS__", json.dumps(items)).replace("__PAGE__", out_dir.name))
+    (out_dir / "index.html").write_text(page)
 
 
 def order_apart(items, seed):
@@ -136,9 +148,7 @@ def main():
             items.append(build_item(category, video, questions[(category, video)], args.data_dir, args.out_dir, args))
     items = order_apart(items, args.seed)
 
-    template = (Path(__file__).parent / "labeling_page.html").read_text()
-    page = template.replace("__ITEMS__", json.dumps(items)).replace("__PAGE__", args.out_dir.name)
-    (args.out_dir / "index.html").write_text(page)
+    write_page(items, args.out_dir)
     print(f"Wrote {len(items)} videos to {args.out_dir / 'index.html'}")
 
 

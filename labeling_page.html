@@ -109,6 +109,7 @@
   <section>
     <div class="row">
       <label class="row" style="gap:6px"><input type="checkbox" id="unsure"> Unsure</label>
+      <label class="row" style="gap:6px" id="approved-wrap" hidden><input type="checkbox" id="approved"> Approved</label>
       <span id="item-status"></span>
     </div>
     <textarea id="note" placeholder="Notes (optional): why unsure, anything odd about the video"></textarea>
@@ -117,6 +118,8 @@
 <script>
 const ITEMS = __ITEMS__;
 const PAGE = "__PAGE__";
+const PREFILL = __PREFILL__;   // labels to start from (a review page of labels made elsewhere), by video id
+const REVIEW = __REVIEW__;     // review page: each video also gets an "Approved" tick
 const KEY = "attention-labels-" + PAGE;
 let labels = {};
 let index = 0;
@@ -132,7 +135,8 @@ function save() {
   catch (e) { document.getElementById("saved").textContent = "Not saved in browser: download your labels before closing"; }
 }
 function entry(item) {
-  if (!labels[item.id]) labels[item.id] = {needed: [], boxes: {}, unsure: false, note: ""};
+  if (!labels[item.id]) labels[item.id] = PREFILL[item.id] ? JSON.parse(JSON.stringify(PREFILL[item.id]))
+                                                           : {needed: [], boxes: {}, unsure: false, note: ""};
   return labels[item.id];
 }
 function isDone(item) {
@@ -169,6 +173,7 @@ function render() {
   });
   renderEditors(item, e);
   document.getElementById("unsure").checked = !!e.unsure;
+  document.getElementById("approved").checked = !!e.approved;
   document.getElementById("note").value = e.note || "";
   renderStatus();
 }
@@ -221,6 +226,14 @@ function renderEditors(item, e) {
 }
 
 function renderStatus() {
+  if (REVIEW) {
+    const approved = ITEMS.filter(i => labels[i.id] && labels[i.id].approved).length;
+    const here = labels[ITEMS[index].id] && labels[ITEMS[index].id].approved;
+    document.getElementById("item-status").innerHTML =
+      (here ? `<span class="done">Approved.</span>` : `<span class="status">Check the label, fix it if needed, then tick Approved.</span>`) +
+      ` <span class="status">${approved} of ${ITEMS.length} videos approved.</span>`;
+    return;
+  }
   const done = ITEMS.filter(isDone).length;
   const here = isDone(ITEMS[index]);
   document.getElementById("item-status").innerHTML =
@@ -243,11 +256,11 @@ function exportLabels() {
   if (!annotator) { alert("Please enter your name at the top first."); return; }
   const out = { annotator, page: PAGE, exported: new Date().toISOString(), videos: ITEMS.length, labels: [] };
   ITEMS.forEach(item => {
-    const e = labels[item.id]; if (!e) return;
+    const e = labels[item.id] || (PREFILL[item.id] && entry(item)); if (!e) return;
     const cells = {}; e.needed.forEach(t => { cells[t] = cellsFor(item, e.boxes[t] || []); });
     out.labels.push({ id: item.id, category: item.category, video: item.video, grid: item.grid,
       frame_size: item.frame_size, needed_steps: e.needed, boxes: e.boxes, cells, unsure: !!e.unsure,
-      note: e.note || "", updated: e.updated || null, done: isDone(item) });
+      note: e.note || "", updated: e.updated || null, done: isDone(item), approved: !!e.approved });
   });
   const blob = new Blob([JSON.stringify(out, null, 1)], {type: "application/json"});
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
@@ -259,7 +272,7 @@ function importLabels(file) {
   reader.onload = () => {
     try { const data = JSON.parse(reader.result);
       (data.labels || []).forEach(l => { labels[l.id] = { needed: l.needed_steps || [], boxes: l.boxes || {},
-        unsure: !!l.unsure, note: l.note || "", updated: l.updated }; });
+        unsure: !!l.unsure, note: l.note || "", updated: l.updated, approved: !!l.approved }; });
       if (data.annotator && !document.getElementById("annotator").value) document.getElementById("annotator").value = data.annotator;
       save(); render(); }
     catch (err) { alert("That file is not a labels file from this page."); }
@@ -271,6 +284,8 @@ document.getElementById("prev").onclick = () => { if (index > 0) { index--; save
 document.getElementById("next").onclick = () => { if (index < ITEMS.length - 1) { index++; save(); render(); window.scrollTo(0, 0); } };
 document.getElementById("toggle-answer").onclick = () => { showAnswer = !showAnswer; render(); };
 document.getElementById("unsure").onchange = ev => { entry(ITEMS[index]).unsure = ev.target.checked; touch(ITEMS[index]); };
+document.getElementById("approved").onchange = ev => { entry(ITEMS[index]).approved = ev.target.checked; touch(ITEMS[index]); };
+if (REVIEW) document.getElementById("approved-wrap").hidden = false;
 document.getElementById("note").oninput = ev => { entry(ITEMS[index]).note = ev.target.value; touch(ITEMS[index]); };
 document.getElementById("annotator").oninput = save;
 document.getElementById("download").onclick = exportLabels;

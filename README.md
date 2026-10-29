@@ -130,6 +130,18 @@ Two scripts draw the results for the labelled videos:
 - `python plot_label_scores.py` writes `per_video_scores.png`: one row per labelled video, with its AUROC next to the control, and its lift. It only needs `per_video.csv`.
 - `python show_label_attention.py labels/labels_peter.json` writes `attention_vs_labels.png`: the model's attention as a heat map on one frame of each labelled video, with the human boxes on top. Add `--layer 22` to show a single layer. It needs the attention files and the videos.
 
+### Labelling more videos with the OpenAI API
+
+`openai_label.py` labels the rest of DyBench's moving direction and reversible dynamics videos the way they were labelled by hand. Each request sends the rules in `labels/labeling_rules.md` (edit them to change how it labels), then a few hand-labelled videos of the same category as worked examples (their time steps, then the hand label as the answer), then the new video, with frames and time steps exactly as on the labelling page. Answers are saved as they arrive, so a stopped run resumes. Each run rebuilds `outputs/openai_labels/review/index.html`: the labelling page pre-filled with the API's labels, with an Approved tick for each video. Check each label, fix it if needed, tick Approved, and download; the downloaded file records which videos were approved. It needs `pip install openai` and `OPENAI_API_KEY` set in the environment:
+
+```bash
+python openai_label.py --list-models
+python openai_label.py --model MODEL --dry-run
+python openai_label.py --model MODEL --limit 20
+```
+
+`--dry-run` builds one request without sending it and saves its images to `outputs/openai_labels/dry_run/`. Each run prints the tokens it used.
+
 ### Attention over layers and time
 
 ```bash
