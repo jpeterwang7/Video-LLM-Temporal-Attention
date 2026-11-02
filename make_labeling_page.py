@@ -94,11 +94,12 @@ def build_item(category, name, question, data_dir, out_dir, args, copy_video=Tru
     }
 
 
-def write_page(items, out_dir, prefill=None, review=False):
-    """index.html for these items. prefill: {video id: label} to start from; review: add an Approved tick."""
+def write_page(items, out_dir, prefill=None, review=False, page=None):
+    """index.html for these items. prefill: {video id: label} to start from; review: add an Approved tick; page: the
+    name saved work and downloads go under (default the folder's name)."""
     template = (Path(__file__).parent / "labeling_page.html").read_text()
     page = (template.replace("__PREFILL__", json.dumps(prefill or {})).replace("__REVIEW__", json.dumps(review))
-            .replace("__ITEMS__", json.dumps(items)).replace("__PAGE__", out_dir.name))
+            .replace("__ITEMS__", json.dumps(items)).replace("__PAGE__", page or out_dir.name))
     (out_dir / "index.html").write_text(page)
 
 

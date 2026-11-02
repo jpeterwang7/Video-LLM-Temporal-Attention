@@ -153,6 +153,10 @@ Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D su
 - `when_each_layer_looks.png`: how each layer spreads its attention on the video across the timeline (1 = even).
 - `tracking_the_object.png`: attention on the labelled boxes at each moment, relative to the boxes' share of the frame (1 = no better than even).
 
+### All labelled videos, all models
+
+`./run_labelled_models.sh` (on the server, with every model's environment set up) runs the models on every video in `labels/labels_peter*.json`, skipping videos they have already answered. It then writes `outputs/model_comparison/accuracy_labelled.{txt,csv,png}` from `labelled_accuracy.py`, and each model's charts to `<run-dir>/analysis/time_layer_250/`, and bundles the accuracy files and tracking charts into `outputs/labelled_250_results.tar.gz`. Accuracy uses every labelled video, and is also given for the API-labelled videos alone, because the hand-labelled ones over-sample Qwen3-VL's mistakes. The charts leave out unfinished and unapproved labels, and any video passed to `plot_time_layer.py --skip`.
+
 ### Working on a laptop
 
 `python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.

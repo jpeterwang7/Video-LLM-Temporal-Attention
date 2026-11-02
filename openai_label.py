@@ -3,8 +3,11 @@ Label DyBench videos with the OpenAI API, the way the hand-labelled videos were 
 
 Each request sends the labelling rules (labels/labeling_rules.md), then a few hand-labelled videos of the same
 category as worked examples (the video's time steps, then the hand label as the answer: the steps picked and
-the boxes), then the new video, and asks for its label in the same form. Frames, time steps and frame sizes
-are exactly those of the labelling page; each step is sent as one image with its two frames side by side.
+the boxes), then the new video, and asks for its label in the same form. Examples come from videos of the same
+kind (synthetic scenes for synthetic scenes), use only labels that are finished and, if reviewed, approved, and
+rotate from request to request, so a long enough run uses every one. A video's reversed twin is never its example.
+Frames, time steps and frame sizes are those of the labelling page; each step is sent as one image with its two
+frames side by side and a scale along the left frame, marked in fractions of that frame.
 
 Answers are saved as they arrive in <out-dir>/responses.jsonl, with token counts, so a stopped run resumes
 where it left off. Every run then rebuilds:
@@ -52,14 +55,37 @@ SCHEMA = {
 }
 
 
+def with_scale(frame_row, frame_h, frame_w):
+    """White margins above and to the left of the frames, marked in fractions of the left frame every 0.1. The
+    marks sit outside the picture so they never cover an object; the second frame gets none."""
+    top, left = 30, 44
+    out = np.full((frame_row.shape[0] + top + 8, frame_row.shape[1] + left, 3), 255, dtype=np.uint8)   # room for the last label
+    out[top:top + frame_row.shape[0], left:] = frame_row
+    for i in range(11):
+        x, y = left + round(i / 10 * (frame_w - 1)), top + round(i / 10 * (frame_h - 1))
+        cv2.line(out, (x, top - 7), (x, top - 1), (0, 0, 0), 1)
+        cv2.line(out, (left - 7, y), (left - 1, y), (0, 0, 0), 1)
+        if i % 2 == 0:
+            cv2.putText(out, f"{i / 10:.1f}", (x - 11, top - 11), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 1, cv2.LINE_AA)
+            cv2.putText(out, f"{i / 10:.1f}", (6, y + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 0, 0), 1, cv2.LINE_AA)
+    return out
+
+
 def step_image(page_dir, step, frames):
-    """One time step as a JPEG data URL: the step's frames side by side (frames="pair") or the first alone."""
+    """One time step as a JPEG data URL: the step's frames side by side (frames="pair") or the first alone,
+    with the scale added."""
     images = [cv2.imread(str(page_dir / rel)) for rel in (step["frames"] if frames == "pair" else step["frames"][:1])]
+    h, w = images[0].shape[:2]
     if len(images) == 2:
-        gap = np.full((images[0].shape[0], 8, 3), 255, dtype=np.uint8)
+        gap = np.full((h, 8, 3), 255, dtype=np.uint8)
         images = [images[0], gap, images[1]]
-    ok, data = cv2.imencode(".jpg", np.hstack(images), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    ok, data = cv2.imencode(".jpg", with_scale(np.hstack(images), h, w), [cv2.IMWRITE_JPEG_QUALITY, 90])
     return "data:image/jpeg;base64," + base64.b64encode(data.tobytes()).decode()
+
+
+def scene_kind(category, video):
+    """Synthetic block-and-sphere videos are named video_<number>; their objects are far smaller than in real footage."""
+    return "synthetic" if video.startswith("video_") else category
 
 
 def video_content(item, page_dir, frames, detail):
@@ -131,7 +157,7 @@ def rebuild(out_dir, responses, model_note):
     labels = {r["item"]["id"]: r["label"] for r in done}
     prefill = {i: {"needed": l["needed_steps"], "boxes": l["boxes"], "unsure": l["unsure"], "note": l["note"]}
                for i, l in labels.items()}
-    write_page(items, out_dir / "review", prefill=prefill, review=True)
+    write_page(items, out_dir / "review", prefill=prefill, review=True, page=out_dir.name)
     json.dump({"annotator": model_note, "exported": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                "videos": len(labels), "labels": list(labels.values())}, open(out_dir / "labels_openai.json", "w"), indent=1)
 
@@ -142,10 +168,14 @@ def main():
     parser.add_argument("--model", help="OpenAI model (see --list-models)")
     parser.add_argument("--list-models", action="store_true", help="Print the models this API key can use, then stop")
     parser.add_argument("--examples", type=Path, nargs="+",
-                        default=[Path("labels/labels_peter.json"), Path("labels/labels_peter_labeling_round2.json")],
-                        help="Hand labels: worked examples, and videos not to label again")
+                        default=[Path("labels/labels_peter.json"), Path("labels/labels_peter_labeling_round2.json"),
+                                 Path("labels/labels_peter_review.json"),
+                                 Path("labels/labels_peter_openai_labels_round2.json"),
+                                 Path("labels/labels_peter_openai_labels_round3.json")],
+                        help="Hand and reviewed labels: worked examples, and videos not to label again")
     parser.add_argument("--rules", type=Path, default=Path("labels/labeling_rules.md"))
     parser.add_argument("--per-request", type=int, default=2, help="Worked examples in each request (same category)")
+    parser.add_argument("--skip-examples", nargs="*", default=[], help="Hand-labelled videos not to use as examples")
     parser.add_argument("--categories", nargs="+", default=CATEGORIES, choices=CATEGORIES)
     parser.add_argument("--limit", type=int, help="Label at most this many new videos in this run")
     parser.add_argument("--frames", choices=["pair", "first"], default="pair",
@@ -177,24 +207,40 @@ def main():
         for label in json.load(open(path))["labels"]:
             hand[(label["category"], label["video"])] = label
 
-    # Worked examples: a fixed set per category, so every request starts the same way (the API can then reuse it)
+    # Worked examples: finished, approved labels of each kind of video, shuffled, taken in turn across requests
     rng = random.Random(args.seed)
     examples_dir = args.out_dir / "examples"
-    examples = {}
-    for category in args.categories:
-        usable = sorted(k for k, l in hand.items() if k[0] == category and l["done"] and not l["unsure"])
-        picked = rng.sample(usable, min(args.per_request, len(usable)))
-        if not picked:
-            raise SystemExit(f"No hand-labelled {category} videos to use as examples")
-        examples[category] = [(build_item(c, v, questions[(c, v)], args.data_dir, examples_dir, frame_args, copy_video=False),
-                               hand[(c, v)]) for c, v in picked]
+    pools, turns, built = {}, {}, {}
+    for k, l in sorted(hand.items()):
+        if k[0] in args.categories and l["done"] and not l["unsure"] and l.get("approved", True) and k[1] not in args.skip_examples:
+            pools.setdefault(scene_kind(*k), []).append(k)
+    for kind, pool in pools.items():
+        rng.shuffle(pool)
+        turns[kind] = 0
+        print(f"{len(pool)} examples for {kind}")
     rules = args.rules.read_text().split("---", 1)[-1].strip()
+    base = lambda video: video.replace("_reversed.mp4", ".mp4")
+
+    def next_examples(category, video):
+        kind = scene_kind(category, video)
+        pool, keys = pools[kind], []
+        for _ in range(len(pool)):
+            key = pool[turns[kind] % len(pool)]
+            turns[kind] += 1
+            if base(key[1]) != base(video):
+                keys.append(key)
+            if len(keys) == args.per_request:
+                break
+        for c, v in keys:
+            if (c, v) not in built:
+                built[(c, v)] = build_item(c, v, questions[(c, v)], args.data_dir, examples_dir, frame_args, copy_video=False)
+        return keys
 
     def messages_for(item, page_dir):
         messages = [{"role": "system", "content": rules}]
-        for example_item, label in examples[item["category"]]:
-            messages.append({"role": "user", "content": video_content(example_item, examples_dir, args.frames, args.detail)})
-            messages.append({"role": "assistant", "content": as_answer(label)})
+        for key in next_examples(item["category"], item["video"]):
+            messages.append({"role": "user", "content": video_content(built[key], examples_dir, args.frames, args.detail)})
+            messages.append({"role": "assistant", "content": as_answer(hand[key])})
         content = video_content(item, page_dir, args.frames, args.detail)
         content[0]["text"] += "\nLabel this video the way the examples are labelled."
         messages.append({"role": "user", "content": content})

@@ -129,6 +129,7 @@ def main():
     parser.add_argument("--out-name", default="time_layer")
     parser.add_argument("--bins", type=int, default=5, help="Relative-time bins (default 5: fifths of the video)")
     parser.add_argument("--model-name", help="Model name for the titles (default: from the run directory)")
+    parser.add_argument("--skip", nargs="*", default=[], help="Videos to leave out")
     args = parser.parse_args()
 
     results = {}
@@ -139,18 +140,24 @@ def main():
                 results[(row["category"], row["video"])] = row
 
     groups = {}
+    missing = 0
     for path in args.labels:
         for label in json.load(open(path))["labels"]:
-            if not label["done"] or label["unsure"]:
+            if not label["done"] or label["unsure"] or not label.get("approved", True) or label["video"] in args.skip:
                 continue
-            result = results[(label["category"], label["video"])]
+            result = results.get((label["category"], label["video"]))
+            if result is None:
+                missing += 1
+                continue
+            if "frames_used" in label and label["frames_used"] != result.get("frames_used", label["frames_used"]):
+                raise RuntimeError(f"{label['video']}: the label and the attention use different frames")
             attention = np.load(args.run_dir / result["attention_file"])["vision_attention"][0].astype(np.float64)
             share, lift = time_layer_maps(attention, label_mask(label), args.bins)
             groups.setdefault(TITLES[label["category"]], []).append(
                 {"share": share, "lift": lift, "correct": bool(result["correct"])})
     groups = {name: groups[name] for name in TITLES.values() if name in groups}
     total = sum(len(v) for v in groups.values())
-    print(f"Loaded {total} labelled videos")
+    print(f"Loaded {total} labelled videos" + (f"; WARNING: {missing} have no result and were left out" if missing else ""))
 
     out_dir = args.run_dir / "analysis" / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
