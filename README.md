@@ -161,6 +161,17 @@ Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D su
 
 `python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.
 
+## Distilling Qwen3-VL's attention into Dynin-Omni
+
+`./run_distill.sh full` (on the server) fine-tunes Dynin-Omni on DyBench answers, with and without an extra loss that pulls its attention toward Qwen3-VL's, and compares the runs on videos they never trained on. `./run_distill.sh smoke` is a quick check on 20 videos; run it first.
+
+- `prepare_distillation.py` writes the split (test is every pair with a labelled video, and twins always stay together) and Qwen3-VL's attention moved onto Dynin-Omni's 5 cropped frames, for the videos Qwen3-VL answered correctly.
+- `train_dynin_distill.py` trains Dynin-Omni's last 7 layers, because the whole model's gradients and optimizer state do not fit on a 24 GB card. It keeps the weights with the best validation accuracy in `best.pt`, and those are the original weights if training never beats them.
+- `run_attention_dynin.py --checkpoint best.pt --split split.json` runs a trained model on the test videos.
+- `distill_results.py` writes accuracy, McNemar tests and attention scores to `outputs/distillation/results.txt`.
+
+Three runs are compared with the unchanged model: answers only (the control any gain must beat), answers plus Qwen3-VL's attention, and answers plus attention from a different video.
+
 ## Other models: VidLaDA (diffusion)
 
 To compare an autoregressive model (Qwen3-VL) with a diffusion one, attention is measured the way the TabAlign paper measured LLaDA: one forward pass over the video, the question and a masked answer canvas, reading each layer's attention (mean over heads) from the first masked answer position. `run_attention_vidlada.py` does this for [VidLaDA-8B](https://huggingface.co/ziHoHe/VidLaDA-8B) on the labelled videos. It feeds exactly the frames Qwen3-VL saw, sums pairs of frames into Qwen3-VL's time steps, and saves the same file layout, plus the labels converted to VidLaDA's 14x14 grid in `outputs/vidlada_8b/labels/`.

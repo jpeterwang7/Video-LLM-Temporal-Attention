@@ -102,6 +102,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
     parser.add_argument("labels", type=Path, nargs="*", help="Labels files: which videos to run, and to convert")
     parser.add_argument("--all-videos", action="store_true", help="Also run every DyBench video (for accuracy)")
+    parser.add_argument("--split", type=Path, help="split.json from prepare_distillation.py: also run its test videos")
+    parser.add_argument("--checkpoint", type=Path, help="best.pt from train_dynin_distill.py, loaded over the model")
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
     parser.add_argument("--model", default="snu-aidas/Dynin-Omni")
     parser.add_argument("--vq-model", default="snu-aidas/magvitv2")
@@ -130,6 +132,8 @@ def main():
         questions.update({(category, q["video"]): q for q in json.load(open(args.data_dir / "json" / f"{category}.json"))})
     if args.all_videos:
         wanted |= set(questions)
+    if args.split:
+        wanted |= {tuple(k) for k in json.load(open(args.split))["test"]}
     wanted = sorted(wanted)
 
     def video_path(category, video):
@@ -175,7 +179,15 @@ def main():
     vq_model = MAGVITv2.from_pretrained(args.vq_model).to(device)
     vq_model.requires_grad_(False)
     vq_model.eval()
-    model = DyninOmniModelLM.from_pretrained(args.model, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device)
+    model = DyninOmniModelLM.from_pretrained(args.model, trust_remote_code=True, torch_dtype=torch.bfloat16)
+    if args.checkpoint:
+        trained = torch.load(args.checkpoint, map_location="cpu", weights_only=True)["state"]
+        missing = set(trained) - set(model.state_dict())
+        if missing:
+            raise RuntimeError(f"{len(missing)} checkpoint weights are not in the model, such as {sorted(missing)[0]}")
+        model.load_state_dict(trained, strict=False)
+        print(f"Loaded {len(trained)} trained weights from {args.checkpoint}")
+    model = model.to(device)
     model.eval()
     blocks = model.model.transformer.blocks
     for block in blocks:
