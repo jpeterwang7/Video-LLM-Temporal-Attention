@@ -1,18 +1,24 @@
 """
-Fine-tune Dynin-Omni on DyBench answers, optionally pulling its attention toward Qwen3-VL's.
+Fine-tune Dynin-Omni on DyBench answers, optionally distilling Qwen3-VL's answers and constraining its attention.
 
-    loss = cross entropy on the answer letter + attn_weight * KL(teacher attention || Dynin-Omni attention)
+    loss = cross entropy on the answer letter + attn_weight * KL(target attention || Dynin-Omni attention)
+
+The answer target mixes the correct letter with Qwen3-VL's preference over the options (from qwen_answer_probs.py,
+softened by --temperature): (1 - qwen_weight) on the correct letter plus qwen_weight spread as Qwen3-VL spreads it.
+qwen_weight 0 trains on the correct letters alone.
 
 Dynin-Omni's attention is read as in run_attention_dynin.py: from the first masked answer slot, over the video, and
-averaged over the trained layers. The attention term applies only to videos with a teacher map (those Qwen3-VL
-answered correctly). --teacher shuffled gives each video another video's map, as a control.
+averaged over the trained layers. The attention target is one of
+    original  Dynin-Omni's own attention before training (from --original-dir), an anchor that keeps it in place
+    qwen      Qwen3-VL's attention (from prepare_distillation.py), for videos Qwen3-VL answered correctly
+    shuffled  another video's Qwen3-VL attention, as a control
 
 Only the last --train-layers blocks are trained: the model's bfloat16 weights take about 16 GB, and gradients and
 optimizer state for all of them would not fit on a 24 GB card. Those blocks keep float32 master weights and Adam
 state on the CPU, so small updates are not lost to bfloat16's rounding. Weights go back to the GPU after each update.
 
-Usage (after prepare_distillation.py, in the Dynin-Omni environment):
-    python train_dynin_distill.py --out-dir outputs/distillation/qwen_attention --attn-weight 1
+Usage (after prepare_distillation.py and qwen_answer_probs.py, in the Dynin-Omni environment):
+    python train_dynin_distill.py --out-dir outputs/distillation/qwen_answers_anchored --qwen-weight 0.5 --attn-weight 1
 
 Writes <out-dir>/best.pt (the trained blocks at the best validation accuracy), which run_attention_dynin.py loads with
 --checkpoint, and <out-dir>/log.jsonl. Video tokens are cached in <data>/video_tokens, shared between runs.
@@ -66,8 +72,14 @@ def main():
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--data", type=Path, default=Path("outputs/distillation"),
                         help="Folder from prepare_distillation.py")
-    parser.add_argument("--attn-weight", type=float, default=1.0, help="Weight of the attention term (0 = answers only)")
-    parser.add_argument("--teacher", choices=["qwen", "shuffled"], default="qwen")
+    parser.add_argument("--qwen-weight", type=float, default=0.0,
+                        help="Share of the answer target taken from Qwen3-VL's preferences (0 = correct letters only)")
+    parser.add_argument("--temperature", type=float, default=2.0, help="Softens Qwen3-VL's preferences")
+    parser.add_argument("--qwen-answers", type=Path, default=Path("outputs/distillation/qwen_answers.jsonl"))
+    parser.add_argument("--attn-weight", type=float, default=0.0, help="Weight of the attention term (0 = none)")
+    parser.add_argument("--attention-target", choices=["original", "qwen", "shuffled"], default="original")
+    parser.add_argument("--original-dir", type=Path, default=Path("outputs/dynin_omni"),
+                        help="Dynin-Omni's attention before training, for --attention-target original")
     parser.add_argument("--train-layers", type=int, default=7, help="Train this many of the last blocks")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--patience", type=int, default=1, help="Stop after this many epochs without a better validation score")
@@ -148,14 +160,43 @@ def main():
                          query_ids], dim=1)
         return ids, video_tokens.shape[1], int(saved["num_frames"])
 
-    # Teacher maps; --teacher shuffled hands each training video a map from another video
+    # Qwen3-VL's preferences over the options, as letter logits
+    qwen_answers = {}
+    if args.qwen_weight > 0:
+        for line in open(args.qwen_answers):
+            row = json.loads(line)
+            if "error" not in row:
+                qwen_answers[(row["category"], row["video"])] = row["letter_logits"]
+
+    # Attention targets; Qwen3-VL's maps come from prepare_distillation.py, Dynin-Omni's own from its earlier run
     def load_map(key):
         path = args.data / "maps" / key[0] / (Path(key[1]).stem + ".npz")
         return np.load(path) if path.exists() else None
 
+    original = {}
+    if args.attention_target == "original" and args.attn_weight > 0:
+        for line in open(args.original_dir / "results.jsonl"):
+            row = json.loads(line)
+            if "error" not in row:
+                original[(row["category"], row["video"])] = row
+
+    def attention_target(key, num_frames):
+        """Flat target over the video tokens, or None. Frames must match the ones this run feeds the model."""
+        if args.attention_target == "original":
+            row = original.get(key)
+            if row is None or row.get("frames_used") != pick_frames(num_frames, args.frames):
+                return None
+            attention = np.load(args.original_dir / row["attention_file"])["vision_attention"][0]
+            target = attention[-args.train_layers:].mean(axis=0).astype(np.float64).ravel()
+            return target / target.sum()
+        own = load_map(key)
+        if own is None or int(own["num_frames"]) != num_frames:
+            return None
+        return load_map(donors[key])["map"].astype(np.float64).ravel()
+
     has_map = [k for k in train if load_map(k) is not None]
     donors = dict(zip(has_map, has_map))
-    if args.teacher == "shuffled":
+    if args.attention_target == "shuffled":
         shuffled = has_map[:]
         random.Random(args.seed).shuffle(shuffled)
         # Twins sit next to each other in has_map, so never hand a video its twin's map
@@ -164,8 +205,9 @@ def main():
                 j = (i + 1) % len(has_map)
                 shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
         donors = dict(zip(has_map, shuffled))
-    print(f"{len(train)} train videos, {len(has_map)} with a teacher map; {len(val)} validation videos; "
-          f"teacher {args.teacher}, attention weight {args.attn_weight}")
+    print(f"{len(train)} train videos, {sum(k in qwen_answers for k in train)} with Qwen3-VL answers "
+          f"(weight {args.qwen_weight}); {len(val)} validation videos; attention target {args.attention_target}, "
+          f"weight {args.attn_weight}")
 
     model = DyninOmniModelLM.from_pretrained(args.model, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device)
     model.eval()
@@ -179,6 +221,7 @@ def main():
     parameters = [p for p in model.parameters() if p.requires_grad]
     optimizer = CpuAdam(parameters, args.lr, args.weight_decay)
     recorder = SdpaRowRecorder(to_cpu=False)
+    letter_ids = [tokenizer.encode(letter, add_special_tokens=False)[0] for letter in LETTERS]
     log_path = args.out_dir / "log.jsonl"
     print(f"Model loaded: training layers {trained[0] + 1}-{trained[-1] + 1} of {len(blocks)}, "
           f"{sum(p.numel() for p in parameters) / 1e6:.0f}M parameters")
@@ -213,7 +256,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         order = train[:]
         random.Random(args.seed + epoch).shuffle(order)
-        totals = {"answer": 0.0, "attention": 0.0, "with_map": 0}
+        totals = {"answer": 0.0, "attention": 0.0, "with_map": 0, "with_qwen": 0}
         start = time.time()
         for n, key in enumerate(order, start=1):
             item = questions[key]
@@ -222,19 +265,24 @@ def main():
             with recorder.record(ids.shape[1]):
                 logits = model(canvas).logits
 
-            # The first slot holds the letter; the second holds "." or the end token, which doesn't change the answer
-            letter = LETTERS[item["candidates"].index(item["answer"])]
-            target = tokenizer.encode(letter, add_special_tokens=False)
-            answer_loss = F.cross_entropy(logits[0, ids.shape[1]].float()[None], torch.tensor(target[:1], device=device))
+            # The first slot holds the letter; the second holds "." or the end token, which doesn't change the answer.
+            # The target over the option letters: the correct one, mixed with Qwen3-VL's preferences when given
+            options = len(item["candidates"])
+            target = torch.zeros(options, device=device)
+            target[item["candidates"].index(item["answer"])] = 1.0
+            if key in qwen_answers:
+                preference = torch.softmax(torch.tensor(qwen_answers[key], device=device) / args.temperature, dim=0)
+                target = (1 - args.qwen_weight) * target + args.qwen_weight * preference
+                totals["with_qwen"] += 1
+            log_probs = torch.log_softmax(logits[0, ids.shape[1]].float(), dim=-1)[letter_ids[:options]]
+            answer_loss = -(target * log_probs).sum()
             loss = answer_loss
             totals["answer"] += float(answer_loss)
 
-            donor = donors.get(key)
-            saved = load_map(donor) if donor is not None else None
-            if saved is not None and args.attn_weight > 0 and int(load_map(key)["num_frames"]) == num_frames:
+            target_map = attention_target(key, num_frames) if args.attn_weight > 0 else None
+            if target_map is not None:
                 row = torch.stack(recorder.rows[-args.train_layers:]).mean(dim=0)[2:2 + video_len]
-                teacher = torch.from_numpy(saved["map"].ravel()).to(row)
-                attention_loss = kl_to_teacher(row, teacher)
+                attention_loss = kl_to_teacher(row, torch.from_numpy(target_map).to(row))
                 loss = loss + args.attn_weight * attention_loss
                 totals["attention"] += float(attention_loss)
                 totals["with_map"] += 1
@@ -250,7 +298,8 @@ def main():
 
         accuracy = validate()
         log({"epoch": epoch, "answer_loss": totals["answer"] / len(order),
-             "attention_kl": totals["attention"] / max(totals["with_map"], 1), "val_accuracy": accuracy,
+             "attention_kl": totals["attention"] / max(totals["with_map"], 1), "with_attention_target": totals["with_map"],
+             "with_qwen_answers": totals["with_qwen"], "val_accuracy": accuracy,
              "minutes": round((time.time() - start) / 60, 1)})
         if accuracy > best:
             best, stale = accuracy, 0

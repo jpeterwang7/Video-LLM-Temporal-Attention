@@ -2,9 +2,9 @@
 Compare the distillation runs on the held-out test videos.
 
 For each run: accuracy and pair accuracy on the test split; exact McNemar tests against the answers-only run (the
-control any gain must beat) and the unchanged model; how close its attention is to Qwen3-VL's (KL, on test videos with
-a teacher map, over the last 7 layers); and how well that attention finds the labelled boxes (AUROC, sinks left out,
-on finished, approved labels other than --skip).
+control any gain must beat) and the first run (the unchanged model); how far its attention moved from the first run's
+(KL, over the last 7 layers, on the test videos); and how well that attention finds the labelled boxes (AUROC, sinks
+left out, on finished, approved labels other than --skip).
 
 Usage (one --run per run: a display name, then its run directory):
     python distill_results.py --run "Unchanged" outputs/dynin_omni --run "Answers only" outputs/distillation/answers_only
@@ -23,24 +23,32 @@ from labelled_accuracy import counts, load_results, mcnemar
 from score_attention import SINK_FRACTION, auroc, label_mask
 
 
-def attention_scores(run_dir, data, test, skip, layers):
-    """(mean KL to the teacher, videos; mean AUROC against the boxes, videos) on the test split."""
-    run_dir = Path(run_dir)
+def attention_files(run_dir):
     files = {}
-    for line in open(run_dir / "results.jsonl"):
+    for line in open(Path(run_dir) / "results.jsonl"):
         row = json.loads(line)
         if "error" not in row:
             files[(row["category"], row["video"])] = row["attention_file"]
+    return files
+
+
+def last_layers(run_dir, attention_file, layers):
+    attention = np.load(Path(run_dir) / attention_file)["vision_attention"][0][-layers:].mean(axis=0).astype(np.float64)
+    return attention / attention.sum()
+
+
+def attention_scores(run_dir, reference_dir, test, skip, layers):
+    """(mean KL from the reference run's attention, videos; mean AUROC against the boxes, videos) on the test split."""
+    run_dir = Path(run_dir)
+    files, reference = attention_files(run_dir), attention_files(reference_dir)
 
     kls = []
     for key in test:
-        map_path = data / "maps" / key[0] / (Path(key[1]).stem + ".npz")
-        if key in files and map_path.exists():
-            teacher = np.load(map_path)["map"].astype(np.float64)
-            student = np.load(run_dir / files[key])["vision_attention"][0][-layers:].mean(axis=0).astype(np.float64)
-            student = student / student.sum()
-            used = teacher > 0
-            kls.append(float((teacher[used] * (np.log(teacher[used]) - np.log(np.maximum(student[used], 1e-10)))).sum()))
+        if key in files and key in reference:
+            before = last_layers(reference_dir, reference[key], layers)
+            after = last_layers(run_dir, files[key], layers)
+            used = before > 0
+            kls.append(float((before[used] * (np.log(before[used]) - np.log(np.maximum(after[used], 1e-10)))).sum()))
 
     aurocs = []
     for path in sorted((run_dir / "labels").glob("labels_peter*.json")):
@@ -91,8 +99,9 @@ def main():
                 lines.append(f"{name:<28}vs {other:<20}only first right {only_a:>3}, only second right {only_b:>3}, p = {p:.3g}")
     lines += ["", f"Attention, last {args.layers} layers:", ""]
     for name, run_dir in args.run:
-        kl, kl_videos, score, score_videos = attention_scores(run_dir, args.data, test, set(args.skip), args.layers)
-        lines.append(f"{name:<28}KL to Qwen3-VL {kl:.3f} ({kl_videos} videos)   AUROC on the boxes {score:.3f} ({score_videos} videos)")
+        kl, kl_videos, score, score_videos = attention_scores(run_dir, args.run[0][1], test, set(args.skip), args.layers)
+        lines.append(f"{name:<28}moved from {args.run[0][0]}: KL {kl:.3f} ({kl_videos} videos)   "
+                     f"AUROC on the boxes {score:.3f} ({score_videos} videos)")
 
     (args.data / "results.txt").write_text("\n".join(lines) + "\n")
     with open(args.data / "results.csv", "w", newline="") as f:

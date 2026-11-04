@@ -161,16 +161,17 @@ Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D su
 
 `python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.
 
-## Distilling Qwen3-VL's attention into Dynin-Omni
+## Distilling Qwen3-VL into Dynin-Omni
 
-`./run_distill.sh full` (on the server) fine-tunes Dynin-Omni on DyBench answers, with and without an extra loss that pulls its attention toward Qwen3-VL's, and compares the runs on videos they never trained on. `./run_distill.sh smoke` is a quick check on 20 videos; run it first.
+`./run_distill.sh full` (on the server) fine-tunes Dynin-Omni on DyBench answers, with and without Qwen3-VL's preferences over the options, and with and without an anchor that keeps Dynin-Omni's attention where it was, then compares the runs on videos they never trained on. `./run_distill.sh smoke` is a quick check; run it first.
 
-- `prepare_distillation.py` writes the split (test is every pair with a labelled video, and twins always stay together) and Qwen3-VL's attention moved onto Dynin-Omni's 5 cropped frames, for the videos Qwen3-VL answered correctly.
-- `train_dynin_distill.py` trains Dynin-Omni's last 7 layers, because the whole model's gradients and optimizer state do not fit on a 24 GB card. It keeps the weights with the best validation accuracy in `best.pt`, and those are the original weights if training never beats them.
+- `prepare_distillation.py` writes the split: test is every pair with a labelled video, and twins always stay together. It also writes Qwen3-VL's attention moved onto Dynin-Omni's frames, for `--attention-target qwen`.
+- `qwen_answer_probs.py` records Qwen3-VL's logits for each option letter on the training and validation videos, with the same input as `run_attention.py`, and checks its top letter against Qwen3-VL's saved answers.
+- `train_dynin_distill.py` trains Dynin-Omni's last 7 layers, because the whole model's gradients and optimizer state do not fit on a 24 GB card. `--qwen-weight` mixes Qwen3-VL's preferences into the answer target, and `--attn-weight` with `--attention-target original` anchors Dynin-Omni's attention to its own attention before training. It keeps the weights with the best validation accuracy in `best.pt`, which are the original weights if training never beats them.
 - `run_attention_dynin.py --checkpoint best.pt --split split.json` runs a trained model on the test videos.
-- `distill_results.py` writes accuracy, McNemar tests and attention scores to `outputs/distillation/results.txt`.
+- `distill_results.py` writes accuracy, McNemar tests, how far attention moved and AUROC on the labelled boxes to `outputs/distillation/results.txt`.
 
-Three runs are compared with the unchanged model: answers only (the control any gain must beat), answers plus Qwen3-VL's attention, and answers plus attention from a different video.
+Three runs are compared with the unchanged model: correct answers only (the control any gain must beat), Qwen3-VL's answers, and Qwen3-VL's answers with the attention anchor.
 
 ## Other models: VidLaDA (diffusion)
 
