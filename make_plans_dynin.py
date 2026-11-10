@@ -5,7 +5,9 @@ Dynin-Omni sees each video as run_attention_dynin.py feeds it (5 frames, centre-
 in the prompt, with the question and options. It is asked for a plan, not an answer: numbered steps, each ending in
 [frames: ...] and [object: ...] tags, the video counterpart of TabAlign's [target: col], so that each step can later
 become a mask over the video. Decoding uses Dynin-Omni's own video-to-text settings (128 tokens, 128 steps, one block,
-lowest-confidence remasking, temperature 0).
+lowest-confidence remasking, temperature 0). The reply is started with "1." (--prefill) so it begins a numbered list;
+--no-options leaves the answer options out, and --text-only leaves the video out, as TabAlign's planner saw only a
+summary of the table rather than the table itself.
 
 This is for checking the plans by hand. It runs a sample of labelled videos and writes to <out-dir>:
     plans.jsonl   the prompt's answer as text, the parsed steps, and the frames (1-5) the label marks
@@ -48,8 +50,10 @@ EXAMPLE_FRAMES = [[1, 2], [4, 5], [1, 5]]
 STEP = re.compile(r"^\s*(\d+)\s*[.)]\s*(.*?)\s*\[\s*frames?\s*:\s*([^\]]*)\]\s*\[\s*object\s*:\s*([^\]]*)\]", re.I)
 
 
-def build_plan_prompt(item, example=True):
-    lines = [item["question"], "Options:"] + [f"{LETTERS[i]}. {c}" for i, c in enumerate(item["candidates"])]
+def build_plan_prompt(item, example=True, options=True):
+    lines = [item["question"]]
+    if options:
+        lines += ["Options:"] + [f"{LETTERS[i]}. {c}" for i, c in enumerate(item["candidates"])]
     return "\n".join(lines) + "\n\n" + INSTRUCTIONS + (EXAMPLE if example else "")
 
 
@@ -114,6 +118,10 @@ def main():
     parser.add_argument("labels", type=Path, nargs="+", help="Labels files to sample videos from")
     parser.add_argument("--per-category", type=int, default=10, help="Videos per category")
     parser.add_argument("--no-example", action="store_true", help="Leave the worked example out of the prompt")
+    parser.add_argument("--no-options", action="store_true", help="Leave the answer options out of the prompt")
+    parser.add_argument("--text-only", action="store_true",
+                        help="Leave the video out, as TabAlign's planner saw only a summary of the table")
+    parser.add_argument("--prefill", default="1.", help="Fixed start of the reply ('' for none)")
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
     parser.add_argument("--model", default="snu-aidas/Dynin-Omni")
     parser.add_argument("--vq-model", default="snu-aidas/magvitv2")
@@ -158,7 +166,8 @@ def main():
             if "error" not in row:
                 done[(row["category"], row["video"])] = row
     todo = [k for k in wanted if k not in done]
-    print(f"{len(wanted)} videos, {len(done)} already done, {len(todo)} to run; example in prompt: {not args.no_example}")
+    print(f"{len(wanted)} videos, {len(done)} already done, {len(todo)} to run; example {not args.no_example}, "
+          f"options {not args.no_options}, video {not args.text_only}, reply starts with {args.prefill!r}")
 
     if todo:
         device = args.device
@@ -197,19 +206,23 @@ def main():
 
                 pixels = torch.stack([image_transform(Image.fromarray(frames[p]), resolution=args.resolution)
                                       for p in picked]).to(device)
-                prompt = ("<|start_header_id|>user<|end_header_id|>\n" + build_plan_prompt(item, not args.no_example)
-                          + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n")
+                prompt = ("<|start_header_id|>user<|end_header_id|>\n"
+                          + build_plan_prompt(item, not args.no_example, not args.no_options)
+                          + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n" + args.prefill)
                 query_ids = torch.tensor(uni_prompting.text_tokenizer([prompt])["input_ids"], device=device)
                 with torch.inference_mode():
-                    video_tokens = (vq_model.get_code(pixels) + len(uni_prompting.text_tokenizer)).view(1, -1)
-                    input_ids = torch.cat([special["<|v2t|>"], special["<|soi|>"], video_tokens, special["<|eoi|>"],
-                                           special["<|sot|>"], query_ids], dim=1)
+                    if args.text_only:
+                        input_ids = query_ids
+                    else:
+                        video_tokens = (vq_model.get_code(pixels) + len(uni_prompting.text_tokenizer)).view(1, -1)
+                        input_ids = torch.cat([special["<|v2t|>"], special["<|soi|>"], video_tokens, special["<|eoi|>"],
+                                               special["<|sot|>"], query_ids], dim=1)
                     output = model.mmu_generate(input_ids, max_new_tokens=args.gen_length, steps=args.steps,
                                                 block_length=args.block_length)
                 generated = output[0, input_ids.shape[1]:].tolist()
                 if eot_id in generated:
                     generated = generated[:generated.index(eot_id)]
-                row["plan"] = uni_prompting.text_tokenizer.decode(generated, skip_special_tokens=True).strip()
+                row["plan"] = (args.prefill + uni_prompting.text_tokenizer.decode(generated, skip_special_tokens=True)).strip()
                 row["steps"] = parse_plan(row["plan"])
             except Exception as e:
                 row["error"] = f"{type(e).__name__}: {e}"

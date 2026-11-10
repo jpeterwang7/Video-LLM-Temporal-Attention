@@ -238,7 +238,7 @@ Following TabAlign, the diffusion model writes a step-by-step plan and the autor
 python make_plans_dynin.py labels/labels_peter*.json
 ```
 
-It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video's 5 frames as Dynin-Omni saw them, with the frames the label marks outlined, the question and the plan), and prints how many plans parse, how many copy the prompt's example and how well the planned frames cover the labelled frames. `--no-example` leaves the worked example out of the prompt, with `--out-dir` set to keep the two apart.
+It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video's 5 frames as Dynin-Omni saw them, with the frames the label marks outlined, the question and the plan), and prints how many plans parse, how many copy the prompt's example and how well the planned frames cover the labelled frames. The reply is started with "1." (`--prefill`) so Dynin-Omni begins a numbered list instead of picking an option. `--no-example` leaves the worked example out of the prompt, `--no-options` leaves the answer options out, and `--text-only` leaves the video out, as TabAlign's planner saw only a summary of the table; set `--out-dir` to keep the variants apart.
 
 ## OmniTrace
 
