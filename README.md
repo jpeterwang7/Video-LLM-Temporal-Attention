@@ -161,18 +161,6 @@ Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D su
 
 `python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.
 
-## Distilling Qwen3-VL into Dynin-Omni
-
-`./run_distill.sh full` (on the server) fine-tunes Dynin-Omni on DyBench answers, with and without Qwen3-VL's preferences over the options, and with and without an anchor that keeps Dynin-Omni's attention where it was, then compares the runs on videos they never trained on. `./run_distill.sh smoke` is a quick check; run it first.
-
-- `prepare_distillation.py` writes the split: test is every pair with a labelled video, and twins always stay together. It also writes Qwen3-VL's attention moved onto Dynin-Omni's frames, for `--attention-target qwen`.
-- `qwen_answer_probs.py` records Qwen3-VL's logits for each option letter on the training and validation videos, with the same input as `run_attention.py`, and checks its top letter against Qwen3-VL's saved answers.
-- `train_dynin_distill.py` trains Dynin-Omni's last 7 layers, because the whole model's gradients and optimizer state do not fit on a 24 GB card. `--qwen-weight` mixes Qwen3-VL's preferences into the answer target, and `--attn-weight` with `--attention-target original` anchors Dynin-Omni's attention to its own attention before training. It keeps the weights with the best validation accuracy in `best.pt`, which are the original weights if training never beats them.
-- `run_attention_dynin.py --checkpoint best.pt --split split.json` runs a trained model on the test videos.
-- `distill_results.py` writes accuracy, McNemar tests, how far attention moved and AUROC on the labelled boxes to `outputs/distillation/results.txt`.
-
-Three runs are compared with the unchanged model: correct answers only (the control any gain must beat), Qwen3-VL's answers, and Qwen3-VL's answers with the attention anchor.
-
 ## Other models: VidLaDA (diffusion)
 
 To compare an autoregressive model (Qwen3-VL) with a diffusion one, attention is measured the way the TabAlign paper measured LLaDA: one forward pass over the video, the question and a masked answer canvas, reading each layer's attention (mean over heads) from the first masked answer position. `run_attention_vidlada.py` does this for [VidLaDA-8B](https://huggingface.co/ziHoHe/VidLaDA-8B) on the labelled videos. It feeds exactly the frames Qwen3-VL saw, sums pairs of frames into Qwen3-VL's time steps, and saves the same file layout, plus the labels converted to VidLaDA's 14x14 grid in `outputs/vidlada_8b/labels/`.
@@ -241,6 +229,16 @@ python compare_models.py \
 ```
 
 Every pair of models is compared on the videos they share.
+
+## Planning with Dynin-Omni (TabAlign step 1)
+
+Following TabAlign, the diffusion model writes a step-by-step plan and the autoregressive model carries it out. `make_plans_dynin.py` asks Dynin-Omni for a plan for each question: numbered steps, each ending in `[frames: ...]` and `[object: ...]` tags (the video version of TabAlign's `[target: col]`), with its 5 frames numbered 1-5 in the prompt. It runs on a sample of labelled videos for checking by hand, in the Dynin-Omni environment:
+
+```bash
+python make_plans_dynin.py labels/labels_peter*.json
+```
+
+It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video's 5 frames as Dynin-Omni saw them, with the frames the label marks outlined, the question and the plan), and prints how many plans parse, how many copy the prompt's example and how well the planned frames cover the labelled frames. `--no-example` leaves the worked example out of the prompt, with `--out-dir` set to keep the two apart.
 
 ## OmniTrace
 
