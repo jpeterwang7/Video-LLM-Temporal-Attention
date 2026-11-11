@@ -7,11 +7,13 @@ of TabAlign's [target: col]. A worked example in the prompt shows the format, an
 begins a numbered list. Decoding follows TabAlign's planner: 128 denoising steps, blocks of 32, greedy,
 lowest-confidence remasking.
 
-It runs a sample of labelled videos for checking by hand and writes to <out-dir>:
+By default it runs a sample of labelled videos for checking by hand and writes to <out-dir>:
     plans.jsonl   the plan as written, the parsed steps, and the frames (1-5) the label marks
     index.html    for each video its 5 frames (labelled frames outlined), the question, the options and the plan
 and prints how many plans parse, how many copy the example, and how well the planned frames cover the labelled ones.
-The 5 frames are the ones Dynin-Omni sees (picked evenly from Qwen3-VL's frames, centre-cropped).
+The 5 frames are the ones Dynin-Omni sees (picked evenly from Qwen3-VL's frames, centre-cropped). With --split it
+plans the split's training and validation videos instead, in a fixed random order (--limit stops after that many), and
+writes only plans.jsonl; a stopped run resumes.
 
 Runs in the Dynin-Omni environment; the model (about 16 GB) downloads on first use.
 """
@@ -171,8 +173,11 @@ def generate(model, prompt_ids, gen_length, steps, block_length):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("labels", type=Path, nargs="+", help="Labels files to sample videos from")
+    parser.add_argument("labels", type=Path, nargs="*", help="Labels files to sample videos from")
     parser.add_argument("--per-category", type=int, default=10, help="Videos per category")
+    parser.add_argument("--split", type=Path, help="split.json from make_split.py: plan its videos instead")
+    parser.add_argument("--parts", nargs="+", default=["train", "val"], help="Parts of the split to plan")
+    parser.add_argument("--limit", type=int, help="With --split, plan only the first this many (in a fixed random order)")
     parser.add_argument("--prefill", default="1.", help="Fixed start of the reply ('' for none)")
     parser.add_argument("--model", default="GSAI-ML/LLaDA-8B-Instruct")
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
@@ -186,7 +191,16 @@ def main():
 
     from transformers import AutoModel, AutoTokenizer
 
-    wanted, labels, questions = sample_videos(args.labels, args.per_category, args.seed, args.data_dir)
+    if args.split:
+        split = json.load(open(args.split))
+        wanted = [tuple(k) for part in args.parts for k in split[part]]
+        random.Random(args.seed).shuffle(wanted)
+        wanted = wanted[:args.limit]
+        labels, questions = {}, {}
+        for category in CATEGORIES:
+            questions.update({(category, q["video"]): q for q in json.load(open(args.data_dir / "json" / f"{category}.json"))})
+    else:
+        wanted, labels, questions = sample_videos(args.labels, args.per_category, args.seed, args.data_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plans_path = args.out_dir / "plans.jsonl"
     done = load_done(plans_path)
@@ -205,7 +219,9 @@ def main():
                    "answer": item["answer"], "frames_dir": f"{key[0]}_{Path(key[1]).stem}"}
             start = time.time()
             try:
-                row["label_frames"] = save_frames(key, labels[key], args.data_dir, args.out_dir / "frames" / row["frames_dir"])
+                if key in labels:
+                    row["label_frames"] = save_frames(key, labels[key], args.data_dir,
+                                                      args.out_dir / "frames" / row["frames_dir"])
                 prompt = tokenizer.apply_chat_template([{"role": "user", "content": build_plan_prompt(item)}],
                                                        add_generation_prompt=True, tokenize=False) + args.prefill
                 prompt_ids = torch.tensor(tokenizer(prompt)["input_ids"], device=args.device)[None]
@@ -226,15 +242,18 @@ def main():
             print(f"[{n}/{len(todo)}] {key[0]}/{key[1]}: {status} ({row['seconds']}s)", flush=True)
 
     rows = [done[k] for k in wanted if k in done]
-    write_page(rows, args.out_dir)
     parsed = [r for r in rows if r.get("steps")]
     copied = sum([s["frames"] for s in r["steps"]] == EXAMPLE_FRAMES for r in parsed)
-    recall = [len(set(r["label_frames"]) & {f for s in r["steps"] for f in s["frames"]}) / len(r["label_frames"])
-              for r in parsed if r["label_frames"]]
     print(f"\n{len(parsed)} of {len(rows)} plans have at least one parsed step; "
           f"steps per plan {np.mean([len(r['steps']) for r in parsed]) if parsed else 0:.1f}; {copied} copy the example's "
-          f"frames exactly; planned frames cover {100 * np.mean(recall) if recall else 0:.0f}% of the labelled frames on average")
-    print(f"Plans: {plans_path}\nReview page: {args.out_dir / 'index.html'}")
+          f"frames exactly")
+    if not args.split:
+        write_page(rows, args.out_dir)
+        recall = [len(set(r["label_frames"]) & {f for s in r["steps"] for f in s["frames"]}) / len(r["label_frames"])
+                  for r in parsed if r.get("label_frames")]
+        print(f"Planned frames cover {100 * np.mean(recall) if recall else 0:.0f}% of the labelled frames on average")
+        print(f"Review page: {args.out_dir / 'index.html'}")
+    print(f"Plans: {plans_path}")
 
 
 if __name__ == "__main__":

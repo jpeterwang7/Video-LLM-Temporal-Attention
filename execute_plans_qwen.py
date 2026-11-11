@@ -5,7 +5,10 @@ Qwen3-VL gets the video exactly as run_attention.py gave it (same frames, sizes 
 options, then the plan's steps one at a time as a conversation: each step's text, its object, and the times in the video
 of the frames it names (the plan numbers the 5 frames Dynin-Omni sees, which are among Qwen3-VL's frames). After the
 last step it answers the question with a letter. Decoding is greedy. The step-by-step answers are the reasoning trace
-Dynin-Omni will later learn from.
+Dynin-Omni will later learn from. Steps whose object is empty or generic ("nothing", "video") only give the times;
+repeated times are dropped; a reply that runs on into the next step is cut there. Questions asking whether the video
+plays forwards or in reverse get one more step that checks for reversed motion, which the plans never include
+(--no-reversal-step leaves it out). The review page is written for up to 100 videos.
 
 For checking by hand it writes to <out-dir>:
     traces.jsonl   per video: each step's prompt and Qwen3-VL's answer, the final answer, and whether it is right
@@ -18,6 +21,7 @@ Usage (in the main environment, after make_plans_llada.py):
 import argparse
 import html
 import json
+import re
 import time
 import traceback
 from pathlib import Path
@@ -35,11 +39,25 @@ from run_attention_vidlada import sample_frames
 
 INTRO = "Work through the following steps one at a time before answering. Answer each step in one sentence."
 FINAL = "Based on your answers to the steps, which option is correct? Answer with the option's letter from the given choices directly."
+# Moving direction questions ask whether the video plays forwards or in reverse, which the plans never check
+REVERSAL = ("Check whether the motion looks natural or as if the video is playing backwards, for example legs or wheels "
+            "moving against the direction of travel, or things moving in a way they normally would not")
+GENERIC_OBJECTS = {"", "nothing", "none", "n/a", "object", "objects", "video", "the video", "frame", "frames", "scene"}
+NEXT_STEP = re.compile(r"\s*Step \d+\s*:")
 
 
 def step_prompt(number, step, times):
+    times = list(dict.fromkeys(round(t, 1) for t in times))
     when = " and ".join(f"{t:.1f}s" for t in times) if times else "the whole video"
+    if step["object"].strip().lower() in GENERIC_OBJECTS:
+        return f"Step {number}: {step['text'].rstrip('.')}. Look around {when}."
     return f"Step {number}: {step['text'].rstrip('.')}. Look at the {step['object']} around {when}."
+
+
+def first_step_only(reply):
+    """Qwen3-VL sometimes goes on to write the next step itself; keep only its answer to this one."""
+    match = NEXT_STEP.search(reply, 1)
+    return reply[:match.start()].strip() if match else reply
 
 
 def write_page(rows, out_dir, plans_dir):
@@ -82,6 +100,8 @@ def main():
     parser.add_argument("--max-frames", type=int, default=32)
     parser.add_argument("--max-vision-tokens", type=int, default=3072)
     parser.add_argument("--step-tokens", type=int, default=64, help="Most tokens for each step's answer")
+    parser.add_argument("--no-reversal-step", action="store_true",
+                        help="Don't add the step that checks whether a moving direction video plays in reverse")
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/qwen_execution"))
     args = parser.parse_args()
@@ -113,7 +133,8 @@ def main():
 
         for n, plan in enumerate(todo, start=1):
             key = (plan["category"], plan["video"])
-            row = {k: plan[k] for k in ("category", "video", "question", "candidates", "answer", "frames_dir")}
+            row = {k: plan[k] for k in ("category", "video", "question", "candidates", "answer")}
+            row["frames_dir"] = plan.get("frames_dir")
             row["direct_correct"] = direct.get(key)
             start = time.time()
             try:
@@ -124,16 +145,17 @@ def main():
                 item = {"question": plan["question"], "candidates": plan["candidates"]}
                 messages = build_video_messages(str(path), "", video_max_pixels=args.max_vision_tokens * QWEN3VL_PIXELS_PER_TOKEN,
                                                 video_fps=args.fps, video_max_frames=args.max_frames)
-                first = True
+                prompts = [step_prompt(number, step, [row["frame_times"][f - 1] for f in step["frames"]])
+                           for number, step in enumerate(plan["steps"], start=1)]
+                if not args.no_reversal_step and "forwards or in reverse" in plan["question"].lower():
+                    prompts.append(f"Step {len(prompts) + 1}: {REVERSAL}.")
                 row["turns"] = []
-                for number, step in enumerate(plan["steps"], start=1):
-                    prompt = step_prompt(number, step, [row["frame_times"][f - 1] for f in step["frames"]])
-                    if first:
+                for number, prompt in enumerate(prompts, start=1):
+                    if number == 1:
                         messages[0]["content"][1]["text"] = build_prompt(item).rsplit("\n", 1)[0] + "\n\n" + INTRO + "\n\n" + prompt
-                        first = False
                     else:
                         messages.append({"role": "user", "content": prompt})
-                    answer = reply(messages, args.step_tokens)
+                    answer = first_step_only(reply(messages, args.step_tokens))
                     messages.append({"role": "assistant", "content": answer})
                     row["turns"].append({"prompt": prompt, "reply": answer})
                 messages.append({"role": "user", "content": FINAL})
@@ -154,7 +176,8 @@ def main():
             print(f"[{n}/{len(todo)}] {key[0]}/{key[1]}: {status} ({row['seconds']}s)", flush=True)
 
     rows = [done[(p["category"], p["video"])] for p in plans if (p["category"], p["video"]) in done]
-    write_page(rows, args.out_dir, Path("..") / args.plans.parent.name)
+    if len(rows) <= 100:
+        write_page(rows, args.out_dir, Path("..") / args.plans.parent.name)
     finished = [r for r in rows if "final" in r]
     compared = [r for r in finished if r.get("direct_correct") is not None]
     gained = sum(r["correct"] and not r["direct_correct"] for r in compared)
