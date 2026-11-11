@@ -33,18 +33,20 @@ from types import SimpleNamespace
 import torch
 
 from make_plans_llada import load_done
-from omnitrace.backends.qwen3vl import VIDEO_INFO_KEY, prepare_inputs_qwen3vl
-from omnitrace.constants import QWEN3VL_MODEL_PATH, QWEN3VL_PIXELS_PER_TOKEN
-from omnitrace.modalities.video import build_video_messages
-from run_attention import LETTERS, build_prompt, find_video, parse_letter
 from run_attention_dynin import pick_frames
-from run_attention_vidlada import sample_frames
+from run_attention_vidlada import LETTERS, build_prompt, parse_letter, sample_frames
 
 INTRO = "Work through the following steps one at a time before answering. Answer each step in one sentence."
 FINAL = "Based on your answers to the steps, which option is correct? Answer with the option's letter from the given choices directly."
 GENERIC_OBJECTS = {"", "nothing", "none", "n/a", "object", "objects", "video", "the video", "frame", "frames", "scene"}
 NEXT_STEP = re.compile(r"\s*Step \d+\s*:")
 STEP_LABEL = re.compile(r"^\s*Step \d+\s*:\s*")
+
+
+def opening(item, first_step):
+    """The first message: the question and options as run_attention.py asks them, without the line asking for a letter,
+    then the instructions and the first step."""
+    return build_prompt(item).rsplit("\n", 1)[0] + "\n\n" + INTRO + "\n\n" + first_step
 
 
 def step_prompt(number, step):
@@ -95,7 +97,7 @@ def main():
     parser.add_argument("--plans", type=Path, default=Path("outputs/plans_llada/plans.jsonl"))
     parser.add_argument("--direct", type=Path, default=Path("outputs/qwen3vl_8b/results.jsonl"),
                         help="Qwen3-VL's direct answers, for comparison")
-    parser.add_argument("--model", default=QWEN3VL_MODEL_PATH)
+    parser.add_argument("--model", help="Default: the Qwen3-VL run_attention.py used")
     parser.add_argument("--fps", type=float, default=2.0)
     parser.add_argument("--max-frames", type=int, default=32)
     parser.add_argument("--max-vision-tokens", type=int, default=3072)
@@ -104,7 +106,12 @@ def main():
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/qwen_execution"))
     args = parser.parse_args()
 
+    from omnitrace.backends.qwen3vl import VIDEO_INFO_KEY, prepare_inputs_qwen3vl
+    from omnitrace.constants import QWEN3VL_MODEL_PATH, QWEN3VL_PIXELS_PER_TOKEN
+    from omnitrace.modalities.video import build_video_messages
+    from run_attention import find_video
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+    args.model = args.model or QWEN3VL_MODEL_PATH
 
     plans = [r for r in load_done(args.plans).values() if r.get("steps")]
     direct = {(r["category"], r["video"]): r["correct"] for r in load_done(args.direct).values()}
@@ -140,14 +147,13 @@ def main():
                 frames, indices, native_fps = sample_frames(path)
                 picked = pick_frames(len(frames), 5)
                 row["frame_times"] = [indices[p] / native_fps for p in picked]
-                item = {"question": plan["question"], "candidates": plan["candidates"]}
                 messages = build_video_messages(str(path), "", video_max_pixels=args.max_vision_tokens * QWEN3VL_PIXELS_PER_TOKEN,
                                                 video_fps=args.fps, video_max_frames=args.max_frames)
                 prompts = [step_prompt(number, step) for number, step in enumerate(plan["steps"], start=1)]
                 row["turns"] = []
                 for number, prompt in enumerate(prompts, start=1):
                     if number == 1:
-                        messages[0]["content"][1]["text"] = build_prompt(item).rsplit("\n", 1)[0] + "\n\n" + INTRO + "\n\n" + prompt
+                        messages[0]["content"][1]["text"] = opening(plan, prompt)
                     else:
                         messages.append({"role": "user", "content": prompt})
                     answer = first_step_only(reply(messages, args.step_tokens))
