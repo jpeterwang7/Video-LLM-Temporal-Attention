@@ -140,7 +140,8 @@ def main():
     parser.add_argument("--step-tokens", type=int, default=64, help="Canvas for each step's answer")
     parser.add_argument("--step-steps", type=int, default=32, help="Denoising steps for each step's answer")
     parser.add_argument("--block-length", type=int, default=32)
-    parser.add_argument("--limit", type=int, help="Use only this many training and validation videos, for a quick test")
+    parser.add_argument("--limit", type=int, help="Use only this many training videos, for a test")
+    parser.add_argument("--val-limit", type=int, help="Use only this many validation videos, for a test")
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
     parser.add_argument("--model", default="snu-aidas/Dynin-Omni")
     parser.add_argument("--vq-model", default="snu-aidas/magvitv2")
@@ -176,7 +177,8 @@ def main():
           f"answer; {len(train)} of them are usable. {len(val)} planned validation videos.")
     if args.limit:
         train = sorted(random.Random(args.seed).sample(train, min(args.limit, len(train))))
-        val = sorted(random.Random(args.seed).sample(val, min(args.limit, len(val))))
+    if args.val_limit:
+        val = sorted(random.Random(args.seed).sample(val, min(args.val_limit, len(val))))
     examples = [(key, turn) for key in train for turn in range(len(traces[key]["turns"]) + 1)]
     args.out_dir.mkdir(parents=True, exist_ok=True)
     json.dump({k: str(v) for k, v in vars(args).items()}, open(args.out_dir / "args.json", "w"), indent=1)
