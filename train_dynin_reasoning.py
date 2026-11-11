@@ -7,7 +7,8 @@ sees its 5 frames, then the same conversation Qwen3-VL had in execute_plans_qwen
 earlier steps with Qwen3-VL's answers, and the current step. It learns to write Qwen3-VL's answer. The last turn asks
 for the option's letter. Qwen3-VL's answers often give times ("action 1 starts at 0:03"), which Qwen3-VL reads off its
 own frames, so Dynin-Omni's first message also says when its 5 frames are ("The video's 5 frames are at 0.0s, 7.0s,
-...").
+..."), and the times in Qwen3-VL's answers are written the same way ("3.0s"). Written as 0:03, Dynin-Omni learned to
+write long runs of ":00".
 
 The loss is Dynin-Omni's own text loss from its stage 3 training (masked diffusion). The reply canvas is masked at a
 random rate t, and the cross entropy of the masked tokens, each divided by t, is summed and divided by --step-tokens.
@@ -64,6 +65,11 @@ NOTHING_HAPPENED = re.compile(
     r"\bneither\b|nothing happen|no (?:significant )?(?:change|movement|motion)|did not (?:move|change)|"
     r"does not (?:move|change)|not (?:moved|changed)|stay(?:s|ed)? still|"
     r"remain(?:s|ed)? (?:still|stationary|unchanged|the same)|(?:same|unchanged|consistent) throughout", re.I)
+
+
+def seconds(reply):
+    """Qwen3-VL's minutes:seconds times written as Dynin-Omni's frame times are: 0:25 -> 25.0s."""
+    return re.sub(r"\b(\d{1,2}):([0-5]\d)\b", lambda m: f"{int(m[1]) * 60 + int(m[2]):.1f}s", reply)
 
 
 def plain(text):
@@ -138,7 +144,8 @@ def main():
     parser.add_argument("--warmup", type=int, default=20, help="Updates over which the learning rate rises to --lr")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--step-tokens", type=int, default=64, help="Canvas for each step's answer")
-    parser.add_argument("--step-steps", type=int, default=32, help="Denoising steps for each step's answer")
+    parser.add_argument("--step-steps", type=int, default=64,
+                        help="Denoising steps for each step's answer (one token per step, as LLaDA decodes)")
     parser.add_argument("--block-length", type=int, default=32)
     parser.add_argument("--limit", type=int, help="Use only this many training videos, for a test")
     parser.add_argument("--val-limit", type=int, help="Use only this many validation videos, for a test")
@@ -230,7 +237,7 @@ def main():
         """(prompt ids, target canvas, number of trained tokens) for one turn of a training trace."""
         trace, item = traces[key], questions[key]
         prompts = [t["prompt"] for t in trace["turns"]] + [FINAL]
-        replies = [t["reply"] for t in trace["turns"]]
+        replies = [seconds(t["reply"]) for t in trace["turns"]]
         ids = prompt_ids(key, conversation(item, frame_times[key], prompts[:turn + 1], replies[:turn]))
         if turn < len(replies):
             target = tokenizer(replies[turn], add_special_tokens=False)["input_ids"][:args.step_tokens - 1]
