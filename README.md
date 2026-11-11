@@ -240,6 +240,8 @@ python make_plans_dynin.py labels/labels_peter*.json
 
 It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video's 5 frames as Dynin-Omni saw them, with the frames the label marks outlined, the question and the plan), and prints how many plans parse, how many copy the prompt's example and how well the planned frames cover the labelled frames. The reply is started with "1." (`--prefill`) so Dynin-Omni begins a numbered list instead of picking an option. `--no-example` leaves the worked example out of the prompt, `--no-options` leaves the answer options out, and `--text-only` leaves the video out, as TabAlign's planner saw only a summary of the table; set `--out-dir` to keep the variants apart.
 
+Dynin-Omni does not write plans: with the worked example it copies the example word for word, and without it it answers the question. So the planner is LLaDA-8B-Instruct, the model TabAlign used, which like TabAlign's planner never sees the raw input. `caption_frames_dynin.py` has Dynin-Omni describe each of its 5 frames in one sentence, the video version of TabAlign's compact table metadata, and `make_plans_llada.py` plans from the question and options, plus those descriptions with `--captions`. Decoding follows TabAlign's planner (128 steps, blocks of 32, greedy). `./run_planners.sh` (on the server) runs the descriptions and four plan variants (with and without the descriptions, with and without the example) on the same 20 videos and bundles them into `outputs/plans_llada.tar.gz`.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:

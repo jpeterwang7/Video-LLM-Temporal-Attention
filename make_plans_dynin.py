@@ -13,8 +13,8 @@ This is for checking the plans by hand. It runs a sample of labelled videos and 
     plans.jsonl   the prompt's answer as text, the parsed steps, and the frames (1-5) the label marks
     index.html    for each video the 5 frames as Dynin-Omni saw them (labelled frames outlined), the question,
                   the options and the plan; open it by double-clicking
-and prints how many plans parse, how many steps they have, how many copy the example's frames, and how well the
-planned frames cover the labelled ones.
+and prints how many plans parse, how many steps they have, how many copy the example, and how well the planned frames
+cover the labelled ones. make_plans_llada.py and caption_frames_dynin.py share its helpers.
 
 Needs the Dynin-Omni environment (see README).
 """
@@ -50,10 +50,12 @@ EXAMPLE_FRAMES = [[1, 2], [4, 5], [1, 5]]
 STEP = re.compile(r"^\s*(\d+)\s*[.)]\s*(.*?)\s*\[\s*frames?\s*:\s*([^\]]*)\]\s*\[\s*object\s*:\s*([^\]]*)\]", re.I)
 
 
-def build_plan_prompt(item, example=True, options=True):
+def build_plan_prompt(item, example=True, options=True, captions=None):
     lines = [item["question"]]
     if options:
         lines += ["Options:"] + [f"{LETTERS[i]}. {c}" for i, c in enumerate(item["candidates"])]
+    if captions:
+        lines += ["", "What each frame shows:"] + [f"Frame {k + 1}: {c}" for k, c in enumerate(captions)]
     return "\n".join(lines) + "\n\n" + INSTRUCTIONS + (EXAMPLE if example else "")
 
 
@@ -81,7 +83,53 @@ def label_frames(label, picked):
     return [k + 1 for k, p in enumerate(picked) if label["boxes"].get(str(p // 2))]
 
 
-def write_page(rows, out_dir):
+def sample_videos(label_paths, per_category, seed, data_dir):
+    """The same sample of finished, approved labelled videos for every planner: (videos, labels, questions)."""
+    labels = {}
+    for path in label_paths:
+        for label in json.load(open(path))["labels"]:
+            if label["done"] and not label["unsure"] and label.get("approved", True):
+                labels[(label["category"], label["video"])] = label
+    rng = random.Random(seed)
+    wanted = []
+    for category in CATEGORIES:
+        pool = sorted(k for k in labels if k[0] == category)
+        wanted += sorted(rng.sample(pool, min(per_category, len(pool))))
+    questions = {}
+    for category in {c for c, _ in wanted}:
+        questions.update({(category, q["video"]): q for q in json.load(open(data_dir / "json" / f"{category}.json"))})
+    return wanted, labels, questions
+
+
+def load_frames(key, label, data_dir, count, resolution, thumbs_dir=None):
+    """(frames Qwen3-VL saw, the `count` picked from them, the label's frames among those); also saves the picked
+    frames, centre-cropped as Dynin-Omni sees them, to thumbs_dir/<k>.jpg."""
+    category, video = key
+    frames, _, _ = sample_frames(data_dir / "video" / category / category / video)
+    if 2 * label["grid"][0] != len(frames):
+        raise RuntimeError(f"{len(frames)} frames read, but the label has {label['grid'][0]} time steps")
+    picked = pick_frames(len(frames), count)
+    if thumbs_dir is not None:
+        height, width = frames[0].shape[:2]
+        x0, y0, x1, y1 = crop_window(width, height, resolution)
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        for k, p in enumerate(picked):
+            crop = frames[p][int(round(y0 * height)):int(round(y1 * height)), int(round(x0 * width)):int(round(x1 * width))]
+            cv2.imwrite(str(thumbs_dir / f"{k + 1}.jpg"), cv2.cvtColor(cv2.resize(crop, (224, 224)), cv2.COLOR_RGB2BGR))
+    return frames, picked, label_frames(label, picked)
+
+
+def load_done(path):
+    done = {}
+    if path.exists():
+        for line in open(path):
+            row = json.loads(line)
+            if "error" not in row:
+                done[(row["category"], row["video"])] = row
+    return done
+
+
+def write_page(rows, out_dir, title):
     cards = []
     for row in rows:
         thumbs = "".join(
@@ -90,16 +138,18 @@ def write_page(rows, out_dir):
             for k in range(5))
         options = "".join(f"<li{' class=answer' if c == row['answer'] else ''}>{LETTERS[i]}. {html.escape(c)}</li>"
                           for i, c in enumerate(row["candidates"]))
+        captions = "".join(f"<li>{html.escape(c)}</li>" for c in row.get("captions") or [])
+        captions = f"<h3>What the planner was told each frame shows</h3><ol>{captions}</ol>" if captions else ""
         steps = "".join(f"<tr><td>{s['text'] and html.escape(s['text'])}</td><td>{', '.join(map(str, s['frames']))}</td>"
                         f"<td>{html.escape(s['object'])}</td></tr>" for s in row.get("steps", []))
         table = (f"<table><tr><th>Step</th><th>Frames</th><th>Object</th></tr>{steps}</table>" if steps
                  else '<p class="warn">No step could be parsed.</p>')
         cards.append(f"""<section><h2>{html.escape(row['category'])} / {html.escape(row['video'])}</h2>
 <div class="frames">{thumbs}</div><p class="note">Outlined: frames your label marks.</p>
-<p><b>{html.escape(row['question'])}</b></p><ol class="options">{options}</ol>
+<p><b>{html.escape(row['question'])}</b></p><ol class="options">{options}</ol>{captions}
 <h3>Plan as written</h3><pre>{html.escape(row.get('plan') or row.get('error', ''))}</pre><h3>Parsed</h3>{table}</section>""")
     page = f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dynin-Omni plans</title><style>
+<title>{html.escape(title)}</title><style>
 body{{font-family:system-ui,sans-serif;margin:0 auto;padding:16px;max-width:980px;background:#fcfcfb;color:#1a1a19}}
 section{{border:1px solid #e3e2de;border-radius:8px;padding:12px 16px;margin:16px 0;background:#fff}}
 h2{{font-size:15px;margin:4px 0 8px}} h3{{font-size:13px;margin:12px 0 4px;color:#52514e}}
@@ -108,8 +158,24 @@ figure.marked{{border-color:#2a78d6}} img{{width:150px;height:150px;display:bloc
 .note{{font-size:12px;color:#898781;margin:4px 0}} .options li.answer{{font-weight:600}}
 pre{{white-space:pre-wrap;background:#f4f3f0;padding:8px;border-radius:4px;font-size:13px}}
 table{{border-collapse:collapse;font-size:13px}} td,th{{border:1px solid #e3e2de;padding:4px 8px;text-align:left}} .warn{{color:#b3261e}}
-</style></head><body><h1>Dynin-Omni plans ({len(rows)} videos)</h1>{''.join(cards)}</body></html>"""
+</style></head><body><h1>{html.escape(title)} ({len(rows)} videos)</h1>{''.join(cards)}</body></html>"""
     (out_dir / "index.html").write_text(page)
+
+
+def report(rows, out_dir, title):
+    """Write the review page and print how the plans look."""
+    write_page(rows, out_dir, title)
+    ok = [r for r in rows if "error" not in r]
+    parsed = [r for r in ok if r["steps"]]
+    copied = sum([s["frames"] for s in r["steps"]] == EXAMPLE_FRAMES for r in parsed)
+    dog = sum(any(s["object"].lower() == "dog" for s in r["steps"]) and "dog" not in r["question"].lower() for r in parsed)
+    recall = [len(set(r["label_frames"]) & {f for s in r["steps"] for f in s["frames"]}) / len(r["label_frames"])
+              for r in parsed if r["label_frames"]]
+    print(f"\n{len(parsed)} of {len(ok)} plans have at least one parsed step; "
+          f"steps per plan {np.mean([len(r['steps']) for r in parsed]) if parsed else 0:.1f}; "
+          f"{copied} copy the example's frames exactly and {dog} its object (dog); planned frames cover "
+          f"{100 * np.mean(recall) if recall else 0:.0f}% of the labelled frames on average")
+    print(f"Plans: {out_dir / 'plans.jsonl'}\nReview page: {out_dir / 'index.html'}")
 
 
 def main():
@@ -143,28 +209,10 @@ def main():
     from training.prompting_utils import UniversalPrompting
     from training.utils import image_transform
 
-    labels = {}
-    for path in args.labels:
-        for label in json.load(open(path))["labels"]:
-            if label["done"] and not label["unsure"] and label.get("approved", True):
-                labels[(label["category"], label["video"])] = label
-    rng = random.Random(args.seed)
-    wanted = []
-    for category in CATEGORIES:
-        pool = sorted(k for k in labels if k[0] == category)
-        wanted += sorted(rng.sample(pool, min(args.per_category, len(pool))))
-    questions = {}
-    for category in {c for c, _ in wanted}:
-        questions.update({(category, q["video"]): q for q in json.load(open(args.data_dir / "json" / f"{category}.json"))})
-
+    wanted, labels, questions = sample_videos(args.labels, args.per_category, args.seed, args.data_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     plans_path = args.out_dir / "plans.jsonl"
-    done = {}
-    if plans_path.exists():
-        for line in open(plans_path):
-            row = json.loads(line)
-            if "error" not in row:
-                done[(row["category"], row["video"])] = row
+    done = load_done(plans_path)
     todo = [k for k in wanted if k not in done]
     print(f"{len(wanted)} videos, {len(done)} already done, {len(todo)} to run; example {not args.no_example}, "
           f"options {not args.no_options}, video {not args.text_only}, reply starts with {args.prefill!r}")
@@ -189,21 +237,9 @@ def main():
                    "answer": item["answer"], "frames_dir": f"{category}_{Path(video).stem}"}
             start = time.time()
             try:
-                path = args.data_dir / "video" / category / category / video
-                frames, _, _ = sample_frames(path)
-                picked = pick_frames(len(frames), args.frames)
-                if 2 * labels[(category, video)]["grid"][0] != len(frames):
-                    raise RuntimeError(f"{len(frames)} frames read, but the label has {labels[(category, video)]['grid'][0]} time steps")
-                row["label_frames"] = label_frames(labels[(category, video)], picked)
-
-                height, width = frames[0].shape[:2]
-                x0, y0, x1, y1 = crop_window(width, height, args.resolution)
-                thumbs = args.out_dir / "frames" / row["frames_dir"]
-                thumbs.mkdir(parents=True, exist_ok=True)
-                for k, p in enumerate(picked):
-                    crop = frames[p][int(round(y0 * height)):int(round(y1 * height)), int(round(x0 * width)):int(round(x1 * width))]
-                    cv2.imwrite(str(thumbs / f"{k + 1}.jpg"), cv2.cvtColor(cv2.resize(crop, (224, 224)), cv2.COLOR_RGB2BGR))
-
+                frames, picked, row["label_frames"] = load_frames(
+                    (category, video), labels[(category, video)], args.data_dir, args.frames, args.resolution,
+                    args.out_dir / "frames" / row["frames_dir"])
                 pixels = torch.stack([image_transform(Image.fromarray(frames[p]), resolution=args.resolution)
                                       for p in picked]).to(device)
                 prompt = ("<|start_header_id|>user<|end_header_id|>\n"
@@ -235,18 +271,7 @@ def main():
             status = row.get("error") or f"{len(row['steps'])} steps parsed"
             print(f"[{n}/{len(todo)}] {category}/{video}: {status} ({row['seconds']}s)", flush=True)
 
-    rows = [done[k] for k in wanted if k in done]
-    write_page(rows, args.out_dir)
-    ok = [r for r in rows if "error" not in r]
-    parsed = [r for r in ok if r["steps"]]
-    copied = sum([s["frames"] for s in r["steps"]] == EXAMPLE_FRAMES for r in parsed)
-    recall = [len(set(r["label_frames"]) & {f for s in r["steps"] for f in s["frames"]}) / len(r["label_frames"])
-              for r in parsed if r["label_frames"]]
-    print(f"\n{len(parsed)} of {len(ok)} plans have at least one parsed step; "
-          f"steps per plan {np.mean([len(r['steps']) for r in parsed]) if parsed else 0:.1f}; "
-          f"{copied} copy the example's frames exactly; planned frames cover "
-          f"{100 * np.mean(recall) if recall else 0:.0f}% of the labelled frames on average")
-    print(f"Plans: {plans_path}\nReview page: {args.out_dir / 'index.html'}")
+    report([done[k] for k in wanted if k in done], args.out_dir, "Dynin-Omni plans")
 
 
 if __name__ == "__main__":
