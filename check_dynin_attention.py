@@ -76,7 +76,7 @@ def to_qwen_grid(dynin, frames_used, grid, crop, scale=8):
 
 def sign_test(diffs):
     """Exact two-sided sign test on paired differences (ties dropped)."""
-    up, down = sum(d > 0 for d in diffs), sum(d < 0 for d in diffs)
+    up, down = int(sum(d > 0 for d in diffs)), int(sum(d < 0 for d in diffs))    # Python ints: 2 ** n overflows numpy's
     n = up + down
     return min(1.0, 2 * sum(comb(n, k) for k in range(min(up, down) + 1)) / 2 ** n) if n else 1.0
 
@@ -88,7 +88,8 @@ def separation(scores, correct, rng, permutations=5000):
     if math.isnan(observed):
         return observed, float("nan")
     null = [auroc(scores, rng.permutation(correct)) for _ in range(permutations)]
-    return observed, float(np.mean([abs(x - 0.5) >= abs(observed - 0.5) for x in null]))
+    # Counting the observed split as one of the permutations keeps p above zero
+    return observed, (1 + sum(abs(x - 0.5) >= abs(observed - 0.5) for x in null)) / (1 + permutations)
 
 
 def twin(video):

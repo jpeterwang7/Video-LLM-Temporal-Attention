@@ -230,19 +230,19 @@ python compare_models.py \
 
 Every pair of models is compared on the videos they share.
 
-## Planning with Dynin-Omni (TabAlign step 1)
+## Planning with LLaDA-8B-Instruct (TabAlign step 1)
 
-Following TabAlign, the diffusion model writes a step-by-step plan and the autoregressive model carries it out. `make_plans_dynin.py` asks Dynin-Omni for a plan for each question: numbered steps, each ending in `[frames: ...]` and `[object: ...]` tags (the video version of TabAlign's `[target: col]`), with its 5 frames numbered 1-5 in the prompt. It runs on a sample of labelled videos for checking by hand, in the Dynin-Omni environment:
+Following TabAlign, a diffusion model writes a step-by-step plan and the autoregressive model carries it out. `make_plans_llada.py` asks LLaDA-8B-Instruct, TabAlign's planner, for a plan for each question: numbered steps, each ending in `[frames: ...]` and `[object: ...]` tags (the video version of TabAlign's `[target: col]`). Like TabAlign's planner it never sees the raw input, only the question, the options and that the video has 5 frames. Decoding follows TabAlign's planner (128 steps, blocks of 32, greedy). Dynin-Omni was tried first but does not follow a planning prompt: it copies the prompt's example or answers the question. On a sample of labelled videos, in the Dynin-Omni environment:
 
 ```bash
-python make_plans_dynin.py labels/labels_peter*.json
+python make_plans_llada.py labels/labels_peter*.json
 ```
 
-It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video's 5 frames as Dynin-Omni saw them, with the frames the label marks outlined, the question and the plan), and prints how many plans parse, how many copy the prompt's example and how well the planned frames cover the labelled frames. The reply is started with "1." (`--prefill`) so Dynin-Omni begins a numbered list instead of picking an option. `--no-example` leaves the worked example out of the prompt, `--no-options` leaves the answer options out, and `--text-only` leaves the video out, as TabAlign's planner saw only a summary of the table; set `--out-dir` to keep the variants apart.
+It writes `outputs/plans_llada/plans.jsonl` and `outputs/plans_llada/index.html` (each video's 5 frames with the frames the label marks outlined, the question and the plan).
 
-Dynin-Omni does not write plans: with the worked example it copies the example word for word, and without it it answers the question. So the planner is LLaDA-8B-Instruct, the model TabAlign used, which like TabAlign's planner never sees the raw input. `caption_frames_dynin.py` has Dynin-Omni describe each of its 5 frames in one sentence, the video version of TabAlign's compact table metadata, and `make_plans_llada.py` plans from the question and options, plus those descriptions with `--captions`. Decoding follows TabAlign's planner (128 steps, blocks of 32, greedy). `./run_planners.sh` (on the server) runs the descriptions and four plan variants (with and without the descriptions, with and without the example) on the same 20 videos and bundles them into `outputs/plans_llada.tar.gz`.
+`execute_plans_qwen.py` is TabAlign's stepwise execution: Qwen3-VL watches the video (as `run_attention.py` gives it), reads the question and options, then answers the plan's steps one at a time in a conversation, each step pointing it at the step's object and at the times in the video of the frames the step names. After the last step it answers with a letter. The step-by-step answers are the reasoning trace Dynin-Omni will learn from. It writes `outputs/qwen_execution/traces.jsonl` and `index.html`, and prints the stepwise accuracy next to Qwen3-VL's direct answers on the same videos.
 
-`check_dynin_attention.py` tests whether Dynin-Omni's attention could replace the plan's targets, using the attention already saved for every video. Check 1 scores Dynin-Omni's attention against the labels, next to a control from other videos' attention. Check 2 moves Dynin-Omni's attention onto Qwen3-VL's grid, takes its top 10% of squares as the target, and asks whether Qwen3-VL's attention lands on that target more when Qwen3-VL answers correctly, per category and within reversed pairs. A reward built on it only works if it does. Results go to `outputs/dynin_attention_check/`.
+`check_dynin_attention.py` tests whether attention on the right object goes with right answers, using the attention already saved for every video. Check 1 scores Dynin-Omni's attention against the labels, next to a control from other videos' attention. Check 2 moves Dynin-Omni's attention onto Qwen3-VL's grid, takes its top 10% of squares as the target, and asks whether Qwen3-VL's attention lands on that target more when Qwen3-VL answers correctly, per category and within reversed pairs (the same with the labels as the target, for comparison). Results go to `outputs/dynin_attention_check/`.
 
 ## OmniTrace
 
