@@ -2,17 +2,21 @@
 Have Qwen3-VL carry out LLaDA-8B-Instruct's plans step by step on the video (TabAlign's stepwise execution).
 
 Qwen3-VL gets the video exactly as run_attention.py gave it (same frames, sizes and prompt format), then the question and
-options, then the plan's steps one at a time as a conversation: each step's text, its object, and the times in the video
-of the frames it names (the plan numbers the 5 frames Dynin-Omni sees, which are among Qwen3-VL's frames). After the
-last step it answers the question with a letter. Decoding is greedy. The step-by-step answers are the reasoning trace
-Dynin-Omni will later learn from. Steps whose object is empty or generic ("nothing", "video") only give the times;
-repeated times are dropped; a reply that repeats the step's number or runs on into the next step is trimmed. The review
-page is written for up to 100 videos.
+options, then the plan's steps one at a time as a conversation: each step's text and its object. After the last step it
+answers the question with a letter. Decoding is greedy. The step-by-step answers are the reasoning trace Dynin-Omni will
+later learn from. Steps whose object is empty or generic ("nothing", "video") only give the step's text;
+a reply that repeats the step's number or runs on into the next step is trimmed. The review page is written for up to
+100 videos.
+
+Qwen3-VL is not told the times of the frames a step names: LLaDA-8B-Instruct plans without seeing the video, so for event
+order those times are a guess at the answer (right in 69 of 137 training videos where they implied an order), and
+Qwen3-VL followed the guess 102 times. It looks for the step's object in the whole video instead.
 
 For checking by hand it writes to <out-dir>:
     traces.jsonl   per video: each step's prompt and Qwen3-VL's answer, the final answer, and whether it is right
     index.html     the plan's frames (from the planner's page), the question, the trace and the final answer
-and prints the accuracy of the stepwise answers next to Qwen3-VL's direct answers on the same videos.
+and prints the accuracy of the stepwise answers next to Qwen3-VL's direct answers on the same videos, overall and per
+category.
 
 Usage (in the main environment, after make_plans_llada.py):
     python execute_plans_qwen.py
@@ -43,12 +47,10 @@ NEXT_STEP = re.compile(r"\s*Step \d+\s*:")
 STEP_LABEL = re.compile(r"^\s*Step \d+\s*:\s*")
 
 
-def step_prompt(number, step, times):
-    times = list(dict.fromkeys(round(t, 1) for t in times))
-    when = " and ".join(f"{t:.1f}s" for t in times) if times else "the whole video"
+def step_prompt(number, step):
     if step["object"].strip().lower() in GENERIC_OBJECTS:
-        return f"Step {number}: {step['text'].rstrip('.')}. Look around {when}."
-    return f"Step {number}: {step['text'].rstrip('.')}. Look at the {step['object']} around {when}."
+        return f"Step {number}: {step['text'].rstrip('.')}."
+    return f"Step {number}: {step['text'].rstrip('.')}. Look at the {step['object']}."
 
 
 def first_step_only(reply):
@@ -141,8 +143,7 @@ def main():
                 item = {"question": plan["question"], "candidates": plan["candidates"]}
                 messages = build_video_messages(str(path), "", video_max_pixels=args.max_vision_tokens * QWEN3VL_PIXELS_PER_TOKEN,
                                                 video_fps=args.fps, video_max_frames=args.max_frames)
-                prompts = [step_prompt(number, step, [row["frame_times"][f - 1] for f in step["frames"]])
-                           for number, step in enumerate(plan["steps"], start=1)]
+                prompts = [step_prompt(number, step) for number, step in enumerate(plan["steps"], start=1)]
                 row["turns"] = []
                 for number, prompt in enumerate(prompts, start=1):
                     if number == 1:
@@ -173,12 +174,15 @@ def main():
     if len(rows) <= 100:
         write_page(rows, args.out_dir, Path("..") / args.plans.parent.name)
     finished = [r for r in rows if "final" in r]
-    compared = [r for r in finished if r.get("direct_correct") is not None]
-    gained = sum(r["correct"] and not r["direct_correct"] for r in compared)
-    lost = sum(r["direct_correct"] and not r["correct"] for r in compared)
-    print(f"\n{len(finished)} of {len(rows)} traces finished. Stepwise accuracy {sum(r['correct'] for r in finished)} / "
-          f"{len(finished)}; answering directly {sum(r['direct_correct'] for r in compared)} / {len(compared)} on the same "
-          f"videos ({gained} now right that were wrong, {lost} now wrong that were right)")
+    print(f"\n{len(finished)} of {len(rows)} traces finished.")
+    for category in [None] + sorted({r["category"] for r in finished}):
+        group = [r for r in finished if category in (None, r["category"])]
+        compared = [r for r in group if r.get("direct_correct") is not None]
+        gained = sum(r["correct"] and not r["direct_correct"] for r in compared)
+        lost = sum(r["direct_correct"] and not r["correct"] for r in compared)
+        print(f"{category or 'All'}: stepwise accuracy {sum(r['correct'] for r in group)} / {len(group)}; answering directly "
+              f"{sum(r['direct_correct'] for r in compared)} / {len(compared)} on the same videos ({gained} now right that "
+              f"were wrong, {lost} now wrong that were right)")
     print(f"Traces: {traces_path}\nReview page: {args.out_dir / 'index.html'}")
 
 
