@@ -242,6 +242,8 @@ It writes `outputs/plans/plans.jsonl` and `outputs/plans/index.html` (each video
 
 Dynin-Omni does not write plans: with the worked example it copies the example word for word, and without it it answers the question. So the planner is LLaDA-8B-Instruct, the model TabAlign used, which like TabAlign's planner never sees the raw input. `caption_frames_dynin.py` has Dynin-Omni describe each of its 5 frames in one sentence, the video version of TabAlign's compact table metadata, and `make_plans_llada.py` plans from the question and options, plus those descriptions with `--captions`. Decoding follows TabAlign's planner (128 steps, blocks of 32, greedy). `./run_planners.sh` (on the server) runs the descriptions and four plan variants (with and without the descriptions, with and without the example) on the same 20 videos and bundles them into `outputs/plans_llada.tar.gz`.
 
+`check_dynin_attention.py` tests whether Dynin-Omni's attention could replace the plan's targets, using the attention already saved for every video. Check 1 scores Dynin-Omni's attention against the labels, next to a control from other videos' attention. Check 2 moves Dynin-Omni's attention onto Qwen3-VL's grid, takes its top 10% of squares as the target, and asks whether Qwen3-VL's attention lands on that target more when Qwen3-VL answers correctly, per category and within reversed pairs. A reward built on it only works if it does. Results go to `outputs/dynin_attention_check/`.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:
