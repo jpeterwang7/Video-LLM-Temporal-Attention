@@ -1,7 +1,7 @@
 #!/bin/bash
 # Step 3: build Dynin-Omni's training set. LLaDA-8B-Instruct plans and Qwen3-VL carries out every training and
 # validation video; traces that end in the right answer are the examples Dynin-Omni will learn from.
-#   ./run_step3.sh check   rerun the 20 sample videos with the executor's fixes (outputs/qwen_execution_v2)
+#   ./run_step3.sh check   rerun the 20 sample videos with the current executor (outputs/qwen_execution_v2)
 #   ./run_step3.sh build   200 videos at a time, in a fixed random order: plan them (outputs/plans_train), then carry
 #                          them out (outputs/traces_train). Stop any time; running it again resumes.
 cd "$(dirname "$0")"

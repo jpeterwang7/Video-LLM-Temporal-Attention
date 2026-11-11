@@ -6,9 +6,8 @@ options, then the plan's steps one at a time as a conversation: each step's text
 of the frames it names (the plan numbers the 5 frames Dynin-Omni sees, which are among Qwen3-VL's frames). After the
 last step it answers the question with a letter. Decoding is greedy. The step-by-step answers are the reasoning trace
 Dynin-Omni will later learn from. Steps whose object is empty or generic ("nothing", "video") only give the times;
-repeated times are dropped; a reply that runs on into the next step is cut there. Questions asking whether the video
-plays forwards or in reverse get one more step that checks for reversed motion, which the plans never include
-(--no-reversal-step leaves it out). The review page is written for up to 100 videos.
+repeated times are dropped; a reply that repeats the step's number or runs on into the next step is trimmed. The review
+page is written for up to 100 videos.
 
 For checking by hand it writes to <out-dir>:
     traces.jsonl   per video: each step's prompt and Qwen3-VL's answer, the final answer, and whether it is right
@@ -39,11 +38,9 @@ from run_attention_vidlada import sample_frames
 
 INTRO = "Work through the following steps one at a time before answering. Answer each step in one sentence."
 FINAL = "Based on your answers to the steps, which option is correct? Answer with the option's letter from the given choices directly."
-# Moving direction questions ask whether the video plays forwards or in reverse, which the plans never check
-REVERSAL = ("Check whether the motion looks natural or as if the video is playing backwards, for example legs or wheels "
-            "moving against the direction of travel, or things moving in a way they normally would not")
 GENERIC_OBJECTS = {"", "nothing", "none", "n/a", "object", "objects", "video", "the video", "frame", "frames", "scene"}
 NEXT_STEP = re.compile(r"\s*Step \d+\s*:")
+STEP_LABEL = re.compile(r"^\s*Step \d+\s*:\s*")
 
 
 def step_prompt(number, step, times):
@@ -55,7 +52,8 @@ def step_prompt(number, step, times):
 
 
 def first_step_only(reply):
-    """Qwen3-VL sometimes goes on to write the next step itself; keep only its answer to this one."""
+    """Qwen3-VL sometimes repeats the step's number or goes on to write the next step itself; keep only its answer."""
+    reply = STEP_LABEL.sub("", reply)
     match = NEXT_STEP.search(reply, 1)
     return reply[:match.start()].strip() if match else reply
 
@@ -100,8 +98,6 @@ def main():
     parser.add_argument("--max-frames", type=int, default=32)
     parser.add_argument("--max-vision-tokens", type=int, default=3072)
     parser.add_argument("--step-tokens", type=int, default=64, help="Most tokens for each step's answer")
-    parser.add_argument("--no-reversal-step", action="store_true",
-                        help="Don't add the step that checks whether a moving direction video plays in reverse")
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/qwen_execution"))
     args = parser.parse_args()
@@ -147,8 +143,6 @@ def main():
                                                 video_fps=args.fps, video_max_frames=args.max_frames)
                 prompts = [step_prompt(number, step, [row["frame_times"][f - 1] for f in step["frames"]])
                            for number, step in enumerate(plan["steps"], start=1)]
-                if not args.no_reversal_step and "forwards or in reverse" in plan["question"].lower():
-                    prompts.append(f"Step {len(prompts) + 1}: {REVERSAL}.")
                 row["turns"] = []
                 for number, prompt in enumerate(prompts, start=1):
                     if number == 1:
