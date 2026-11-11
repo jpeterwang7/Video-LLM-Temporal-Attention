@@ -10,9 +10,11 @@ own frames, so Dynin-Omni's first message also says when its 5 frames are ("The 
 ...").
 
 The loss is Dynin-Omni's own text loss from its stage 3 training (masked diffusion). The reply canvas is masked at a
-random rate t, and the masked tokens' cross entropy, each divided by t, is averaged over the canvas. For a step, the
-canvas is the reply, then the end token up to --step-tokens; for the last turn, it is the letter and the end token.
-As in LLaDA's fine-tuning, the filler end tokens are trained too, so Dynin-Omni learns where to stop.
+random rate t, and the cross entropy of the masked tokens, each divided by t, is summed and divided by --step-tokens.
+For a step, the canvas is the reply, then the end token up to --step-tokens. For the last turn, it is the letter and
+the end token. As in Dynin-Omni's training, only the reply and its first end token are trained: the filler end tokens
+are left out, and every trained token weighs the same. Training on the filler taught it to fill the canvas with end
+tokens and answer every step with one letter. The learning rate rises linearly over the first --warmup updates.
 
 Attention anchor: Dynin-Omni's attention finds the labelled objects (check_dynin_attention.py), so training should not
 move where it looks. Before training, the untouched model's attention is recorded for every example in each trained
@@ -96,12 +98,16 @@ def conversation(item, times, prompts, replies):
 class CpuAdam:
     """AdamW on float32 master copies held on the CPU; the model's parameters only hold their bfloat16 rounding."""
 
-    def __init__(self, parameters, lr, weight_decay):
+    def __init__(self, parameters, lr, weight_decay, warmup):
         self.parameters = list(parameters)
         self.masters = [torch.nn.Parameter(p.detach().float().cpu()) for p in self.parameters]
         self.optimizer = torch.optim.AdamW(self.masters, lr=lr, weight_decay=weight_decay)
+        self.lr, self.warmup, self.steps = lr, warmup, 0
 
     def step(self, max_norm):
+        self.steps += 1
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.lr * min(1.0, self.steps / max(self.warmup, 1))
         for parameter, master in zip(self.parameters, self.masters):
             master.grad = parameter.grad.float().cpu()
             parameter.grad = None
@@ -129,6 +135,7 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Dynin-Omni's own stage 3 learning rate")
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--accumulate", type=int, default=32, help="Examples (turns) per update")
+    parser.add_argument("--warmup", type=int, default=20, help="Updates over which the learning rate rises to --lr")
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--step-tokens", type=int, default=64, help="Canvas for each step's answer")
     parser.add_argument("--step-steps", type=int, default=32, help="Denoising steps for each step's answer")
@@ -218,18 +225,18 @@ def main():
         return torch.tensor([ids], device=device)
 
     def example(key, turn):
-        """(prompt ids, target canvas) for one turn of a training trace."""
+        """(prompt ids, target canvas, number of trained tokens) for one turn of a training trace."""
         trace, item = traces[key], questions[key]
         prompts = [t["prompt"] for t in trace["turns"]] + [FINAL]
         replies = [t["reply"] for t in trace["turns"]]
         ids = prompt_ids(key, conversation(item, frame_times[key], prompts[:turn + 1], replies[:turn]))
         if turn < len(replies):
             target = tokenizer(replies[turn], add_special_tokens=False)["input_ids"][:args.step_tokens - 1]
-            target += [eos_id] * (args.step_tokens - len(target))
+            length = args.step_tokens
         else:
             target = tokenizer(LETTERS[item["candidates"].index(item["answer"])], add_special_tokens=False)["input_ids"]
-            target += [eos_id] * (2 - len(target))
-        return ids, torch.tensor(target, device=device)
+            length = 2
+        return ids, torch.tensor(target + [eos_id] * (length - len(target)), device=device), len(target) + 1
 
     model = DyninOmniModelLM.from_pretrained(args.model, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device)
     model.eval()
@@ -291,6 +298,9 @@ def main():
         torch.cuda.empty_cache()
         with open(args.out_dir / f"val_traces_{epoch}.jsonl", "w") as f:
             f.writelines(json.dumps(r) + "\n" for r in rows)
+        for r in rows[:3]:
+            print(f"  {r['video']}: final {r['final']!r} ({'right' if r['correct'] else 'wrong'})\n" +
+                  "\n".join(f"    {t['reply'][:150]}" for t in r["turns"]), flush=True)
         by_category = {c: f"{sum(r['correct'] for r in rows if r['category'] == c)}/{sum(r['category'] == c for r in rows)}"
                        for c in CATEGORIES}
         return sum(r["correct"] for r in rows) / max(len(rows), 1), by_category
@@ -312,7 +322,7 @@ def main():
         start = time.time()
         with torch.no_grad():
             for n, (key, turn) in enumerate(examples, start=1):
-                ids, target = example(key, turn)
+                ids, target, _ = example(key, turn)
                 anchors[(key, turn)] = video_attention(ids, len(target)).float().cpu()
                 if n % 500 == 0 or n == len(examples):
                     print(f"Anchor targets: {n}/{len(examples)} ({(time.time() - start) / n:.2f}s each)", flush=True)
@@ -321,7 +331,7 @@ def main():
     best, by_category = validate(0)
     save_best()
     log({"epoch": 0, "val_accuracy": best, "val_by_category": by_category, "minutes": round((time.time() - start) / 60, 1)})
-    optimizer = CpuAdam(parameters, args.lr, args.weight_decay)
+    optimizer = CpuAdam(parameters, args.lr, args.weight_decay, args.warmup)
     stale = 0
     for epoch in range(1, args.epochs + 1):
         order = examples[:]
@@ -329,15 +339,18 @@ def main():
         totals = {"text": 0.0, "anchor": 0.0}
         start = time.time()
         for n, (key, turn) in enumerate(order, start=1):
-            ids, target = example(key, turn)
-            # Dynin-Omni's text loss: mask the canvas at a random rate t, predict the masked tokens, weight them 1/t
+            ids, target, answer_len = example(key, turn)
+            # Dynin-Omni's text loss: mask the canvas at a random rate t, predict the masked tokens of the reply and its
+            # end token, weight them 1/t
             t = (1 - 1e-3) * random.random() + 1e-3
             masked = torch.rand(len(target), device=device) < t
-            if not masked.any():
-                masked[random.randrange(len(target))] = True
+            if not masked[:answer_len].any():
+                masked[random.randrange(answer_len)] = True
             canvas = torch.where(masked, torch.full_like(target, MASK_ID), target)
-            logits = model(torch.cat([ids, canvas[None]], dim=1)).logits[0, ids.shape[1]:]
-            text_loss = (F.cross_entropy(logits[masked].float(), target[masked], reduction="none") / t).sum() / len(target)
+            logits = model(torch.cat([ids, canvas[None]], dim=1)).logits[0, ids.shape[1]:ids.shape[1] + answer_len]
+            scored = masked[:answer_len]
+            text_loss = (F.cross_entropy(logits[scored].float(), target[:answer_len][scored], reduction="none") / t).sum() \
+                / args.step_tokens
             (text_loss / args.accumulate).backward()
             totals["text"] += float(text_loss)
             del logits
