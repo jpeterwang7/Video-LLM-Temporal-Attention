@@ -6,9 +6,12 @@
 #   4. Qwen3-VL carries out the test plans in every configuration, most important first
 #   5. summary.txt, and results.tar.gz to copy back
 #
-#   ./run_tabalign.sh smoke     the whole pipeline on 6 validation and 6 test videos (about 20 minutes), to check it runs
-#   ./run_tabalign.sh full      everything (many hours); stop it any time, running it again resumes where it stopped
-#   ./run_tabalign.sh summary   only step 5
+#   ./run_tabalign.sh smoke       the whole pipeline on 6 validation and 6 test videos (about 20 minutes), to check it runs
+#   ./run_tabalign.sh preview N   early numbers: LLaDA plans and Qwen3-VL carries out the first N test videos (default
+#                                 30, one pair per category in turn), without the verifier, which needs the
+#                                 calibration; about 20 minutes for 30
+#   ./run_tabalign.sh full        everything (many hours); stop it any time, running it again resumes where it stopped
+#   ./run_tabalign.sh summary     only step 5
 cd "$(dirname "$0")"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True     # less fragmentation on the 24 GB card
 MAIN=.venv/bin/python
@@ -16,8 +19,8 @@ DYNIN=.venv-dynin/bin/python
 MODE=${1:-smoke}
 case "$MODE" in
     smoke) CAL=smoke_calib; TEST=smoke_test; OUT=outputs/tabalign_smoke ;;
-    full|summary) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
-    *) echo "Usage: $0 smoke|full|summary"; exit 1 ;;
+    full|summary|preview) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
+    *) echo "Usage: $0 smoke|preview [N]|full|summary"; exit 1 ;;
 esac
 mkdir -p "$OUT"
 LOG="$OUT/log.txt"
@@ -31,6 +34,17 @@ run() {
         exit "$status"
     fi
 }
+
+if [ "$MODE" = preview ]; then
+    N=${2:-30}
+    [ -f outputs/split.json ] || run $MAIN make_split.py labels/labels_peter*.json
+    run $MAIN tabalign_video.py --out-dir "$OUT"
+    run $DYNIN plan_tabalign.py --planner llada --set $TEST --limit $N --exclude-set smoke_test --out-dir "$OUT"
+    run $MAIN execute_tabalign.py --set $TEST --plan llada --reward none --limit $N --exclude-set smoke_test \
+        --run-name preview --out-dir "$OUT"
+    echo "PREVIEW DONE: accuracy above; traces in $OUT/runs/$TEST/preview/traces.jsonl"
+    exit 0
+fi
 
 if [ "$MODE" != summary ]; then
     [ -f outputs/split.json ] || run $MAIN make_split.py labels/labels_peter*.json

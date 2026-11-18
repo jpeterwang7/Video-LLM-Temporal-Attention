@@ -104,8 +104,8 @@ def main():
 
     sets = tv.load_sets(args.out_dir / "sets.json")
     wanted = []
-    for name in args.set:
-        wanted += [k for k in sets[name][:args.limit] if k not in wanted]
+    for name in args.set:        # in the executor's order
+        wanted += [k for k in tv.interleave_pairs(sets[name])[:args.limit] if k not in wanted]
     questions = tv.load_questions(args.data_dir)
     targets = plan_targets(args.out_dir)
     root = args.out_dir / "dynin"

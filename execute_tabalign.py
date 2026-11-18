@@ -504,7 +504,9 @@ def main():
     parser.add_argument("--reward", choices=["none", "dynin", "qwen", "oracle", "oracle_noise"], default="dynin")
     parser.add_argument("--record-qwen", action="store_true", help="Also score every step with Qwen3-VL's own masks")
     parser.add_argument("--only-labelled", action="store_true", help="Only videos with a usable human label")
-    parser.add_argument("--limit", type=int)
+    parser.add_argument("--limit", type=int, help="Only the first N videos (one pair per category in turn)")
+    parser.add_argument("--run-name", help="Folder under runs/<set>/ (default: <plan>_<reward>)")
+    parser.add_argument("--exclude-set", nargs="*", default=[], help="Leave out the videos of these sets first")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--labels", type=Path, nargs="*", default=sorted(Path("labels").glob("labels_peter*.json")))
@@ -526,7 +528,7 @@ def main():
         for label in json.load(open(path))["labels"]:
             if label["done"] and not label["unsure"] and label.get("approved", True):
                 labels[(label["category"], label["video"])] = label
-    wanted = tv.interleave_pairs(sets[args.set])[:args.limit]     # every category early on, for mid-run summaries
+    wanted = tv.select_videos(sets, args.set, args.exclude_set, args.limit)    # every category early on
     if args.only_labelled:
         wanted = [k for k in wanted if k in labels]
     plans = tv.load_rows(args.out_dir / f"plans_{args.plan}.jsonl") if args.plan != "none" else {}
@@ -536,7 +538,7 @@ def main():
     dynin_choice = calibration.get("dynin_choice", "dynin_squeeze")
     direct = {k: r["correct"] for k, r in tv.load_rows(args.direct).items()}
 
-    run_dir = args.out_dir / "runs" / args.set / f"{args.plan}_{args.reward}"
+    run_dir = args.out_dir / "runs" / args.set / (args.run_name or f"{args.plan}_{args.reward}")
     run_dir.mkdir(parents=True, exist_ok=True)
     traces_path = run_dir / "traces.jsonl"
     done = tv.load_rows(traces_path)

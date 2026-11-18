@@ -123,6 +123,7 @@ def main():
     parser.add_argument("--planner", choices=["llada", "qwen"], required=True)
     parser.add_argument("--set", nargs="+", default=["calib", "test"], help="Sets from sets.json to plan")
     parser.add_argument("--limit", type=int, help="Only the first N videos of each set")
+    parser.add_argument("--exclude-set", nargs="*", default=[], help="Leave out the videos of these sets first")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--llada-model", default="GSAI-ML/LLaDA-8B-Instruct")
@@ -137,8 +138,8 @@ def main():
 
     sets = tv.load_sets(args.out_dir / "sets.json")
     wanted = []
-    for name in args.set:
-        wanted += [k for k in sets[name][:args.limit] if k not in wanted]
+    for name in args.set:        # in the executor's order, so --limit N plans the videos it runs first
+        wanted += [k for k in tv.select_videos(sets, name, args.exclude_set, args.limit) if k not in wanted]
     questions = tv.load_questions(args.data_dir)
     path = args.out_dir / f"plans_{args.planner}.jsonl"
     done = tv.load_rows(path)

@@ -100,6 +100,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--set", default="test")
+    parser.add_argument("--exclude-set", nargs="*", default=["smoke_test"],
+                        help="Leave these sets' videos out of every number (the smoke-test videos were looked at while "
+                             "debugging)")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--direct", type=Path, default=Path("outputs/qwen3vl_8b/results.jsonl"))
     parser.add_argument("--dynin-5", type=Path, default=Path("outputs/dynin_omni"), help="The 5-frame Dynin-Omni run")
@@ -108,7 +111,8 @@ def main():
     args = parser.parse_args()
 
     sets = tv.load_sets(args.out_dir / "sets.json")
-    keys = sets[args.set]
+    excluded = {k for name in args.exclude_set if name != args.set for k in sets.get(name, [])}
+    keys = [k for k in sets[args.set] if k not in excluded]
     direct_rows = tv.load_rows(args.direct)
     direct = {k: r["correct"] for k, r in direct_rows.items()}
     runs = {}
@@ -116,7 +120,9 @@ def main():
         rows = tv.load_rows(args.out_dir / "runs" / args.set / name / "traces.jsonl")
         if rows:
             runs[name] = rows
-    lines = [f"TabAlign for video on DyBench, set '{args.set}': {len(keys)} videos "
+    lines = [f"TabAlign for video on DyBench, set '{args.set}'"
+             + (f" without the {len(excluded & set(sets[args.set]))} videos looked at while debugging" if excluded else "")
+             + f": {len(keys)} videos "
              f"({', '.join(f'{sum(k[0] == c for k in keys)} {SHORT[c].lower()}' for c in tv.CATEGORIES)}).",
              "Accuracy in % ± binomial standard deviation (videos); Avg = mean of the categories ± its standard error; "
              "Pairs = a video and its reversed twin both right; +a/-b = right only here / right only directly, exact "

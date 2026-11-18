@@ -142,6 +142,13 @@ def load_rows(path):
     return rows
 
 
+def select_videos(sets, name, exclude=(), limit=None):
+    """A set's videos in the executor's order (interleave_pairs), leaving out the videos of the sets in `exclude`
+    (the smoke-test videos, looked at while debugging), then the first `limit`."""
+    excluded = {k for other in exclude for k in sets.get(other, [])}
+    return [k for k in interleave_pairs(sets[name]) if k not in excluded][:limit]
+
+
 def interleave_pairs(keys):
     """Videos with each reversed twin next to its original, taking one pair from each category in turn, so a run read
     or stopped part way through covers every category."""
