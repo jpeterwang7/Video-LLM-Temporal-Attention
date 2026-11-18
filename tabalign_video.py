@@ -17,8 +17,10 @@ TabAlign (Kwok et al., NeurIPS 2026, arXiv 2605.14465) works on tables. Its part
     reasoner: Qwen3-VL-8B, at most   the same, calling tools that read the frames at full size (the image modality)
       6 tool steps, temperature 0.7
     TabAttn: R = attention on m_t /  the same formula over the video tokens, from the position that emits each tool
-      attention on the table,          call, last 4 layers; a two-parameter logistic fit on terminal correctness of
-      logistic calibration             the validation split, 80/20 with early stopping
+      attention on the table,          call, last 4 layers, leaving out Qwen3-VL's attention sinks (its top 1% of
+      logistic calibration             squares, which otherwise decide R on their own; text cells have no such sinks);
+                                       a two-parameter logistic fit on terminal correctness of the validation split,
+                                       80/20 with early stopping
     in-loop feedback, stagnation     the same: score and rationale go into the next turn; the reasoner stops when the
       halt (0.02, 2 steps)             score has not improved by 0.02 for 2 steps and the state has not changed
 
@@ -198,10 +200,34 @@ def parse_steps(text, count):
     return sorted(chosen) or None
 
 
-def parse_plan(text, count):
+GENERIC_TARGETS = {"video", "the video", "scene", "the scene", "frame", "frames", "image", "object", "objects",
+                   "time step", "time steps", "step", "steps", "nothing", "none", "n/a", "all", "everything", "target",
+                   "action", "actions", "event", "events", "answer", "options", "option"}
+
+
+def clean_target(target, item=None):
+    """A plan target as a grounding query: markup and stray symbols removed, "Action 1" replaced by the question's
+    action (TabAlign resolves a [target: col] tag against the table's columns), and None for a target that names
+    nothing in particular ("video", "scene"), which TabAlign treats as an unparseable tag."""
+    if not target:
+        return None
+    text = re.sub(r"[<>&*`{}\[\]|]", " ", target)
+    text = re.sub(r"\b(?:target|object|steps?)\s*:?", " ", text, flags=re.I)        # tag words that leaked in
+    text = re.sub(r"^[\s;,.:]+|[\s;,.:]+$", "", re.sub(r"\s*[;,]\s*(?=[;,])", "", text))
+    if item is not None:
+        actions = question_actions(item)
+        text = re.sub(r"\b(?:action|event)\s*_?\s*([1-9])\b", lambda m: actions.get(m.group(1), m.group(0)), text,
+                      flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip(" ;,.:'\"")
+    if text.lower() in GENERIC_TARGETS or not re.search(r"[a-z]{3}", text.lower()):
+        return None
+    return text
+
+
+def parse_plan(text, count, item=None):
     """Numbered steps as {"op", "text", "target", "steps_text", "steps"}. A step without a readable target gets
     target None, and without readable time steps steps None: TabAlign then uses a uniform mask and treats the step's
-    score as uninformative."""
+    score as uninformative. With the question (item), targets are cleaned by clean_target."""
     steps = []
     for line in text.splitlines():
         match = STEP_LINE.match(line)
@@ -227,7 +253,7 @@ def parse_plan(text, count):
                                                         pieces[-1].lower() or "x"):
                     tail.insert(0, pieces.pop())
                 target, steps_text = (", ".join(pieces), ", ".join(tail)) if tail else (inner, None)
-            target = target.strip(" ;,.'\"") or None
+            target = clean_target(target.strip(" ;,.'\""), item)
             steps_text = steps_text.strip(" ;,.") if steps_text else None
         if not what and not target:
             continue
@@ -305,9 +331,10 @@ def plan_step_prompt(number, step):
     return f"Plan step {number}: {describe_step(step)}"
 
 
-PLAN_DONE = "The plan is done. Call f_final_answer with the letter of the correct option."
+PLAN_DONE = "The plan is done. Based on the observations, call f_final_answer with the letter of the correct option."
 NO_PLAN_NEXT = "Next call."
-BUDGET_DONE = "No tool calls are left. Call f_final_answer with the letter of the correct option."
+BUDGET_DONE = ("No tool calls are left. Based on the observations, call f_final_answer with the letter of the correct "
+               "option.")
 FINAL_FALLBACK = "Answer with the option's letter from the given choices directly."
 
 CALL_START = re.compile(r"\b(f_(?:lookup|compare|filter|sort|aggregate|select|final_answer))\s*\(", re.I)
@@ -342,18 +369,20 @@ def strip_arg_name(text):
     return re.sub(r"^\s*[a-z_]+\s*=\s*", "", text, flags=re.I).strip(" \"'")
 
 
+STEP_TOKEN = re.compile(r"(?:the\s+)?(?:time\s*)?(?:step|frame)?\s*(\d+|first|last|start|end|beginning|final|middle)"
+                        r"(?:\s*(?:time\s*)?(?:step|frame))?")
+
+
 def parse_step_token(text, count):
-    """'3', 'step 3', 'first' or 'last' -> a 0-based time step, or None."""
-    text = strip_arg_name(str(text)).lower()
-    if re.fullmatch(r"(time\s*)?(step\s*)?\d+", text):
-        return min(max(int(re.search(r"\d+", text).group()), 1), count) - 1
-    if re.search(r"\b(first|start|beginning|begin)\b", text):
-        return 0
-    if re.search(r"\b(last|end|final)\b", text):
-        return count - 1
-    if re.search(r"\bmiddle\b", text):
-        return count // 2
-    return None
+    """'3', 'step 3', 'time step 3', 'first', 'the last' -> a 0-based time step, or None (anything longer, such as
+    'the end of the video', is not a step)."""
+    match = STEP_TOKEN.fullmatch(strip_arg_name(str(text)).lower().strip())
+    if not match:
+        return None
+    word = match.group(1)
+    if word.isdigit():
+        return min(max(int(word), 1), count) - 1
+    return {"first": 0, "start": 0, "beginning": 0, "middle": count // 2}.get(word, count - 1)
 
 
 def question_actions(item):
@@ -368,33 +397,42 @@ def resolve_event(text, item):
 
 
 def read_call(name, args, count, item):
-    """Interpret a parsed call's arguments: a dict for the tool, or an error message."""
-    parts = [strip_arg_name(p) for p in split_args(args)]
+    """Interpret a parsed call's arguments: a dict for the tool, or an error message. Time steps may come anywhere
+    and several at once (f_lookup(person, 1, 5) looks in both); a dict with "tool" redirects the call
+    (f_compare of two of the question's actions is the order question f_sort answers)."""
+    parts = split_args(args)
     if name == "f_final_answer":
         letter = parse_letter(args, item["candidates"])
         return {"letter": letter} if letter else "f_final_answer needs one of the option letters"
-    if name in ("f_lookup", "f_compare"):
-        need = 1 if name == "f_lookup" else 2
-        steps = []
-        while parts and len(steps) < need and parse_step_token(parts[-1], count) is not None:
-            steps.insert(0, parse_step_token(parts.pop(), count))
-        if len(steps) < need or not parts:
-            return f"{name} needs an object and {need} time step{'s' if need > 1 else ''}"
-        return {"object": ", ".join(parts), "steps": steps}
-    if name == "f_filter":
-        return {"event": resolve_event(", ".join(parts), item)} if parts else "f_filter needs an event"
-    if name == "f_sort":
-        if len(parts) == 1 and " and " in parts[0]:
-            parts = parts[0].split(" and ", 1)
-        if len(parts) < 2:
-            return "f_sort needs two events"
-        half = len(parts) // 2
-        return {"events": [resolve_event(", ".join(parts[:half]), item), resolve_event(", ".join(parts[half:]), item)]}
-    if name == "f_aggregate":
-        return {"object": ", ".join(parts)} if parts else "f_aggregate needs an object"
     if name == "f_select":
-        steps = sorted({s for s in (parse_step_token(p, count) for p in re.split(r"[,\s]+and\s+|,|\s+", args)) if s is not None})
+        steps = [parse_step_token(p, count) for p in re.split(r"[,\s]+and\s+|,|\s+", args)]
+        steps = sorted({s for s in steps if s is not None})
         return {"steps": steps[:4]} if steps else "f_select needs time steps"
+    steps = list(dict.fromkeys(s for s in (parse_step_token(p, count) for p in parts) if s is not None))
+    words = [p for p in parts if parse_step_token(p, count) is None]
+    if name == "f_lookup":
+        if not words or not steps:
+            return "f_lookup needs an object and a time step"
+        return {"object": ", ".join(words), "steps": steps[:4]}
+    if name == "f_compare":
+        actions = set(question_actions(item).values())
+        events = [resolve_event(w, item) for w in words]
+        if len(set(events) & actions) >= 2:
+            return {"events": [e for e in events if e in actions][:2], "tool": "f_sort"}
+        if not words or len(steps) < 2:
+            return "f_compare needs an object and two time steps"
+        return {"object": ", ".join(words), "steps": [steps[0], steps[-1]]}
+    if name == "f_filter":
+        return {"event": resolve_event(", ".join(words), item)} if words else "f_filter needs an event"
+    if name == "f_sort":
+        if len(words) == 1:
+            words = re.split(r"\s+(?:and|vs\.?|versus|before|or)\s+", words[0], maxsplit=1)
+        if len(words) < 2:
+            return "f_sort needs two events"
+        half = len(words) // 2
+        return {"events": [resolve_event(", ".join(words[:half]), item), resolve_event(", ".join(words[half:]), item)]}
+    if name == "f_aggregate":
+        return {"object": ", ".join(words)} if words else "f_aggregate needs an object"
     return f"unknown tool {name}"
 
 
@@ -443,12 +481,16 @@ def parse_boxes(text, image_size=None):
         y0, y1 = sorted((min(max(y0, 0), 1), min(max(y1, 0), 1)))
         if x1 - x0 < 1e-3 or y1 - y0 < 1e-3:
             continue
-        tail = text[match.end():match.end() + 400]
-        head = text[max(0, match.start() - 200):match.start()]
-        label = re.search(r"\"label\"\s*:\s*\"([^\"]*)\"", tail) or re.search(r"\"label\"\s*:\s*\"([^\"]*)\"[^{]*$", head)
-        state = re.search(r"\"state\"\s*:\s*\"([^\"]*)\"", tail) or re.search(r"\"state\"\s*:\s*\"([^\"]*)\"[^{]*$", head)
-        found.append({"box": [round(v, 4) for v in (x0, y0, x1, y1)],
-                      "label": label.group(1) if label else None, "state": state.group(1) if state else None})
+        # the fields of the same entry: after the box up to the next entry, or before it back to the entry's start
+        tail = text[match.end():match.end() + 400].split("}")[0]
+        head = text[max(0, match.start() - 300):match.start()].split("{")[-1]
+
+        def field(name):
+            found_field = re.search(rf"\"{name}\"\s*:\s*\"([^\"]*)\"", tail) or re.search(rf"\"{name}\"\s*:\s*\"([^\"]*)\"", head)
+            return found_field.group(1).strip() if found_field else None
+
+        found.append({"box": [round(v, 4) for v in (x0, y0, x1, y1)], "label": field("label"), "state": field("state"),
+                      "facing": field("facing")})
     return found
 
 
@@ -463,9 +505,17 @@ def box_area(box):
 def describe_box(name, found):
     x, y = box_center(found["box"])
     text = f"{name} at x {x:.2f}, y {y:.2f}, covering {100 * box_area(found['box']):.0f}% of the frame"
-    if found.get("state"):
-        text += f" ({found['state']})"
+    notes = [n for n in (found.get("state"), facing_text(found)) if n]
+    if notes:
+        text += f" ({'; '.join(notes)})"
     return text
+
+
+def facing_text(found):
+    facing = (found or {}).get("facing")
+    if not facing or facing.lower() in ("unclear", "unknown", "none", "n/a", ""):
+        return None
+    return facing if facing.lower().startswith("facing") else f"facing {facing}"
 
 
 def movement_words(box_a, box_b, still=0.03):
@@ -478,7 +528,9 @@ def movement_words(box_a, box_b, still=0.03):
     parts.append(f"moved {'down' if dy > 0 else 'up'} by {abs(dy):.2f} of the frame height (y {ya:.2f} to {yb:.2f})"
                  if abs(dy) >= still else f"did not move up or down (y {ya:.2f} to {yb:.2f})")
     ratio = box_area(box_b) / max(box_area(box_a), 1e-6)
-    if ratio > 1.2:
+    if ratio > 4 or ratio < 0.25:
+        parts.append("its box changed size too much to compare (the two boxes may not cover the same thing)")
+    elif ratio > 1.2:
         parts.append(f"grew to {ratio:.1f} times its size (closer to the camera or larger)")
     elif ratio < 1 / 1.2:
         parts.append(f"shrank to {ratio:.1f} times its size (farther from the camera or smaller)")
@@ -566,21 +618,37 @@ def sink_squares(all_layer_map, fraction=SINK_FRACTION):
     return sinks.reshape(np.shape(all_layer_map))
 
 
-def shuffled_r(attention, mask, rng, draws=20):
+def shuffled_r(attention, mask, rng, draws=20, eligible=None):
     """TabAlign's density-preserving null (D.4): R with the mask's squares moved at random within each of its time
-    steps, the count per time step kept, averaged over draws."""
+    steps (among the eligible squares), the count per time step kept, averaged over draws."""
     if mask is None or attention is None:
         return None
     attention = np.asarray(attention, dtype=np.float64)
+    eligible = np.ones(mask.shape, dtype=bool) if eligible is None else eligible
     values = []
     for _ in range(draws):
         shuffled = np.zeros_like(mask)
         for t in range(mask.shape[0]):
             k = int(mask[t].sum())
-            if k:
-                shuffled[t].flat[rng.choice(mask[t].size, size=k, replace=False)] = True
+            pool = np.flatnonzero(eligible[t])
+            if k and len(pool) >= k:
+                shuffled[t].flat[rng.choice(pool, size=k, replace=False)] = True
         values.append(r_attn(attention, shuffled))
     return float(np.mean(values))
+
+
+def sink_free_r(attention, all_layer_attention, mask, rng=None):
+    """R (Eq. 1) without the reasoner's attention sinks. TabAlign scores text cells; Qwen3-VL's attention over video
+    tokens piles onto a few sink tokens (check_attention_sinks.py), so whether one sink square falls inside a mask
+    swings R from a few percent to over 80%. The top 1% of squares by all-layer attention are left out of both sums.
+    Returns (R without sinks, TabAlign's literal R, the shuffled-mask null of the first)."""
+    if mask is None or attention is None:
+        return None, None, None
+    sinks = sink_squares(all_layer_attention)
+    clean = np.where(sinks, 0.0, np.asarray(attention, dtype=np.float64))
+    kept = mask & ~sinks
+    null = shuffled_r(clean, kept, rng, eligible=~sinks) if rng is not None else None
+    return r_attn(clean, kept), r_attn(attention, mask), null
 
 
 def compile_mask(score_map, steps, fraction=TARGET_FRACTION, sinks=None):

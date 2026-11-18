@@ -7,8 +7,10 @@ one plan step at a time, at most 6 tool steps, temperature 0.7 (TabAlign Section
 plan operations; they look at single frames at full size (TabAlign's image modality) and compute what can be
 computed (positions, movement, order) in code:
 
-    f_lookup(object, step)        Qwen3-VL's grounding on that time step's frame: box, state, which way it faces
-    f_compare(object, a, b)       both lookups, the movement between them in code, and Qwen3-VL on the two frames
+    f_lookup(object, steps)       Qwen3-VL's grounding on each time step's frame (up to 4): box, state, which way it faces
+    f_compare(object, a, b)       both lookups (the nearest time step where the object is found, if not), the movement
+                                  between them in code, and Qwen3-VL on the two frames; two of the question's actions
+                                  are an order question and go to f_sort
     f_filter(event)               yes/no on every time step's frame
     f_sort(event_a, event_b)      which of the two each time step's frame shows; the order in code
     f_aggregate(object)           lookups across the video (up to 6 time steps), the path in code
@@ -17,7 +19,9 @@ computed (positions, movement, order) in code:
 
 TabAttn. At the position that emits each tool call, Qwen3-VL's attention over the video tokens (mean of the last 4
 layers and of the heads) is compared with the plan step's mask m_t: R = attention inside m_t / attention on the video
-(Eq. 1). The mask is the top 25% of each of the step's time steps by a grounding map of the step's target:
+(Eq. 1), leaving out Qwen3-VL's attention sinks (its top 1% of squares), which otherwise decide R on their own
+(tabalign_video.sink_free_r; TabAlign's literal R is recorded too, as R_raw). The mask is the top 25% of each of the
+step's time steps by a grounding map of the step's target:
     dynin         Dynin-Omni's attention for "Find the <target> in the video." (ground_dynin.py), the diffusion
                   model's understanding, as TabAlign's masks come from its diffusion planner
     qwen          Qwen3-VL's own attention for the same query (the autoregressive counterpart)
@@ -48,7 +52,7 @@ import torch
 import tabalign_video as tv
 
 LOOKUP_PROMPT = """Locate {what} in this image. Reply with JSON only, a list with one entry per object:
-[{{"bbox_2d": [x1, y1, x2, y2], "label": "<name>", "state": "<a few words: what it is doing or what state it is in, and which way it faces or moves>"}}]
+[{{"bbox_2d": [x1, y1, x2, y2], "label": "<name>", "state": "<a few words: what it is doing or what state it is in>", "facing": "<which way it faces: left, right, toward the camera, away from the camera, or unclear>"}}]
 Reply [] if it is not in the image."""
 COMPARE_PROMPT = ("These are two frames of the same video: the first image is time step {a} ({ta:.1f}s) and the second "
                   "is time step {b} ({tb:.1f}s). In one sentence, how did {what} change between them (position, state "
@@ -57,7 +61,7 @@ FILTER_PROMPT = "Does this image show {event}? Answer yes or no."
 SORT_PROMPT = "Which of these can be seen in this image?\n1. {a}\n2. {b}\n0. neither\nAnswer with the number only."
 SELECT_PROMPT = "Describe what this image shows in one short sentence."
 HALT_TEXT = ("The verifier stopped the run: the last steps did not improve the grounding and added nothing new. "
-             "Call f_final_answer with the letter of the correct option.")
+             "Based on the observations, call f_final_answer with the letter of the correct option.")
 
 
 class Video:
@@ -208,22 +212,39 @@ class Tools:
             self.lookups[key] = matched
         return self.lookups[key]
 
+    def nearest_found(self, obj, step, toward):
+        """`step`, or the nearest time step up to 2 away (moving toward `toward`) where every object of `obj` is found."""
+        direction = 1 if toward > step else -1
+        for k in range(3):
+            s = step + direction * k
+            if not 0 <= s < self.v.count or (k and s == toward):
+                break
+            if all(self.lookup(obj, s).values()):
+                return s
+        return step
+
+    @staticmethod
+    def notes(found):
+        return "; ".join(n for n in (found.get("state"), tv.facing_text(found)) if n) or "?"
+
     def run(self, name, args):
         if name == "f_lookup":
-            step = args["steps"][0]
-            found = self.lookup(args["object"], step)
-            return f"In {self.at(step)}: " + "; ".join(
-                tv.describe_box(f"the {n}", f) if f else f"the {n} was not found" for n, f in found.items()) + "."
+            lines = []
+            for step in args["steps"]:
+                found = self.lookup(args["object"], step)
+                lines.append(f"In {self.at(step)}: " + "; ".join(
+                    tv.describe_box(f"the {n}", f) if f else f"the {n} was not found" for n, f in found.items()) + ".")
+            return " ".join(lines)
         if name == "f_compare":
-            a, b = args["steps"]
+            a, b = (self.nearest_found(args["object"], s, other) for s, other in
+                    ((args["steps"][0], args["steps"][1]), (args["steps"][1], args["steps"][0])))
             first, second = self.lookup(args["object"], a), self.lookup(args["object"], b)
-            parts = []
+            parts = [f"not found in time step {s + 1}, so time step {used + 1} is used"
+                     for s, used in zip(args["steps"], (a, b)) if s != used]
             for n in first:
                 if first[n] and second[n]:
                     parts.append(f"the {n} " + tv.movement_words(first[n]["box"], second[n]["box"]))
-                    states = [f.get("state") for f in (first[n], second[n])]
-                    if any(states):
-                        parts.append(f"the {n} at the first: {states[0] or '?'}; at the second: {states[1] or '?'}")
+                    parts.append(f"the {n} at the first: {self.notes(first[n])}; at the second: {self.notes(second[n])}")
                 else:
                     parts.append(f"the {n} was not found in both time steps")
             names = list(first)
@@ -266,8 +287,10 @@ class Tools:
                 return f"The {obj} was found in fewer than two time steps, so its path is unknown."
             points = "; ".join(f"step {s + 1} x {tv.box_center(f['box'])[0]:.2f} y {tv.box_center(f['box'])[1]:.2f}"
                                for s, f in path)
-            return (f"The {obj} through the video: {points}. From step {path[0][0] + 1} to step {path[-1][0] + 1} it "
+            text = (f"The {obj} through the video: {points}. From step {path[0][0] + 1} to step {path[-1][0] + 1} it "
                     + tv.movement_words(path[0][1]["box"], path[-1][1]["box"]) + ".")
+            return text + (f" At step {path[0][0] + 1}: {self.notes(path[0][1])}; at step {path[-1][0] + 1}: "
+                           f"{self.notes(path[-1][1])}.")
         if name == "f_select":
             return " ".join(f"{self.at(s).capitalize()}: {self._ask([s], SELECT_PROMPT, 40)[0]}" for s in args["steps"])
         return f"Error: unknown tool {name}."
@@ -373,6 +396,8 @@ def run_video(reasoner, item, key, plan_steps, args, calibration, masks_args, dy
         call = tv.parse_call(reply)
         if call is not None:
             name, parsed = call[0], tv.read_call(call[0], call[1], count, item)
+            if isinstance(parsed, dict) and "tool" in parsed:
+                turn["redirected_from"], name = name, parsed.pop("tool")
         elif step is not None:
             (name, parsed), turn["parse_error"] = default_call(step, count), True
         else:
@@ -393,17 +418,14 @@ def run_video(reasoner, item, key, plan_steps, args, calibration, masks_args, dy
         if attention is not None:
             att4, att_all = attention[-tv.ATTN_LAYERS:].mean(axis=0), attention.mean(axis=0)
             attention_maps.append((att4, att_all))
-        sinks = tv.sink_squares(att_all) if att_all is not None else None
-        r_values, r_nosink, r_null = {}, {}, {}
+        r_values, r_raw, r_null = {}, {}, {}
         for source in masks.sources(args.reward):
-            mask = masks.mask(source, target, steps)
-            r_values[source] = tv.r_attn(att4, mask)
-            r_nosink[source] = tv.r_attn(np.where(sinks, 0, att4), mask & ~sinks) if mask is not None and att4 is not None else None
-            r_null[source] = tv.shuffled_r(att4, mask, masks.rng)
+            r_values[source], r_raw[source], r_null[source] = tv.sink_free_r(att4, att_all, masks.mask(source, target, steps),
+                                                                             masks.rng)
 
         observation = tools.run(name, parsed) if isinstance(parsed, dict) else f"Error: {parsed}."
         turn.update(call=name, args=parsed if isinstance(parsed, dict) else None, observation=observation,
-                    tool_error=not isinstance(parsed, dict), target=target, steps=steps, R=r_values, R_nosink=r_nosink,
+                    tool_error=not isinstance(parsed, dict), target=target, steps=steps, R=r_values, R_raw=r_raw,
                     R_null=r_null)
         unchanged = observation in observations
         observations.append(observation)

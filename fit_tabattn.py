@@ -3,8 +3,8 @@ Fit TabAttn's calibration: p(correct) = sigmoid(a * R + b), on the validation sp
 
 TabAlign fits its verifier's two parameters by binary cross-entropy against terminal trajectory correctness, 80/20 with
 the inner 20% only for early stopping (Section 4.2, A). Here every step of every validation trajectory carried out
-without feedback (execute_tabalign.py --set calib --reward none) gives one example: its R (Eq. 1) for a mask source,
-labelled with whether the trajectory ended right. Steps without a mask are left out (TabAlign's uninformative steps).
+without feedback (execute_tabalign.py --set calib --reward none) gives one example: its R (Eq. 1, without Qwen3-VL's
+attention sinks) for a mask source, labelled with whether the trajectory ended right. Steps without a mask are left out (TabAlign's uninformative steps).
 One fit per mask source. The Dynin-Omni frame setting that makes the masks (whole frame squeezed, or centre crop as
 Dynin-Omni was trained) is chosen here, on validation, by the lower held-out cross-entropy.
 

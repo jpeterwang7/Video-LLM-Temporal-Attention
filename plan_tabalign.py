@@ -5,8 +5,12 @@ The planner gets the question, the options and compact metadata (the video's len
 the counterpart of a table's column names), and writes 2 to 4 steps, each naming one of six operations and ending in
 [target: <object or event>; steps: <time steps>], the counterpart of TabAlign's [target: col] (Section 4.1, B.2).
 
-    --planner llada   LLaDA-8B-Instruct, decoded exactly as TabAlign's planner: a 256-token canvas, blocks of 32,
-                      128 denoising steps, classifier-free guidance 1.5, greedy, lowest-confidence remasking
+    --planner llada   LLaDA-8B-Instruct, decoded as TabAlign's planner: a 256-token canvas, blocks of 32, classifier-free
+                      guidance 1.5, greedy, lowest-confidence remasking, and 256 denoising steps, TabAlign's setting
+                      "for higher-quality plans" (B.2). Its default of 128 steps fixes 2 tokens per step, and in the
+                      smoke run that fused neighbouring words ("movesove or changesver") and broke target tags.
+                      Decoding stops after the block in which the plan ends: blocks are fixed left to right and
+                      everything after the end token is dropped anyway, so the plan is the same and costs less
                       (Dynin-Omni environment)
     --planner qwen    Qwen3-VL-8B as the autoregressive planner of TabAlign's Table 5, same prompt, greedy, text only
                       (main environment)
@@ -35,10 +39,10 @@ MASK_ID = 126336
 
 
 @torch.no_grad()
-def llada_generate(model, prompt_ids, gen_length=256, steps=128, block_length=32, cfg_scale=1.5):
+def llada_generate(model, prompt_ids, gen_length=256, steps=256, block_length=32, cfg_scale=1.5, stop_ids=()):
     """LLaDA's sampler as TabAlign runs it: fully masked canvas, semi-autoregressive blocks, in each step the most
     confident masked tokens of the current block are fixed (greedy), with classifier-free guidance against the same
-    canvas with the prompt masked out."""
+    canvas with the prompt masked out. Stops after a block containing one of stop_ids (later blocks stay masked)."""
     length = prompt_ids.shape[1]
     x = torch.full((1, length + gen_length), MASK_ID, dtype=torch.long, device=prompt_ids.device)
     x[:, :length] = prompt_ids
@@ -66,6 +70,8 @@ def llada_generate(model, prompt_ids, gen_length=256, steps=128, block_length=32
             confidence = torch.where(is_masked, confidence, torch.full_like(confidence, -float("inf")))
             chosen = confidence[0].topk(count).indices
             x[0, chosen] = guess[0, chosen]
+        if any(int(t) in stop_ids for t in x[0, start:end].tolist()):
+            break
     return x[0, length:].tolist()
 
 
@@ -83,11 +89,11 @@ class LladaPlanner:
         text = self.tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True,
                                                   tokenize=False) + self.args.prefill
         ids = torch.tensor(self.tokenizer(text)["input_ids"], device=self.args.device)[None]
+        stops = tuple(s for s in (self.eot, self.eos) if s is not None)
         out = llada_generate(self.model, ids, self.args.gen_length, self.args.steps, self.args.block_length,
-                             self.args.cfg_scale)
-        for stop in (self.eot, self.eos):
-            if stop is not None and stop in out:
-                out = out[:out.index(stop)]
+                             self.args.cfg_scale, stops)
+        cut = min([out.index(s) for s in stops if s in out] + [len(out)])
+        out = [t for t in out[:cut] if t != MASK_ID]
         return (self.args.prefill + self.tokenizer.decode(out, skip_special_tokens=True)).strip()
 
 
@@ -123,7 +129,7 @@ def main():
     parser.add_argument("--qwen-model", help="Default: the Qwen3-VL run_attention.py used")
     parser.add_argument("--prefill", default="1.", help="Fixed start of the reply")
     parser.add_argument("--gen-length", type=int, default=256, help="TabAlign's canvas length")
-    parser.add_argument("--steps", type=int, default=128, help="TabAlign's denoising steps")
+    parser.add_argument("--steps", type=int, default=256, help="Denoising steps (TabAlign's higher-quality setting)")
     parser.add_argument("--block-length", type=int, default=32, help="TabAlign's block length")
     parser.add_argument("--cfg-scale", type=float, default=1.5, help="TabAlign's classifier-free guidance")
     parser.add_argument("--device", default="cuda:0")
@@ -159,7 +165,7 @@ def main():
                     print("Planner loaded", flush=True)
                 row["plan"] = planner(prompt)
                 by_prompt[digest] = row
-            row["steps"] = tv.parse_plan(row["plan"], count)
+            row["steps"] = tv.parse_plan(row["plan"], count, item)
         except Exception as e:
             row["error"] = f"{type(e).__name__}: {e}"
             traceback.print_exc()
@@ -171,6 +177,8 @@ def main():
         done[key] = row
         status = row.get("error") or f"{len(row['steps'])} steps" + (" (reused)" if "reused_from" in row else "")
         print(f"[{n}/{len(todo)}] {key[0]}/{key[1]}: {status} ({row['seconds']}s)", flush=True)
+        if "plan" in row and "reused_from" not in row:
+            print("    " + row["plan"].replace("\n", "\n    "), flush=True)
 
     rows = [done[k] for k in wanted if k in done]
     parsed = [r for r in rows if r.get("steps")]

@@ -233,29 +233,32 @@ def main():
     # G. Does R measure grounding?
     source_run = runs.get("llada_none")
     if source_run:
-        lines += ["G. Does R measure grounding? (TabAlign D.4) From the run without feedback; null = the same number of "
-                  "squares per time step placed at random (20 draws)",
-                  f"   {'mask source':<16}{'steps':>7}{'R':>8}{'null':>8}{'R/null':>8}{'R > null':>16}"
+        lines += ["G. Does R measure grounding? (TabAlign D.4) From the run without feedback. R leaves Qwen3-VL's attention "
+                  "sinks out; raw R is TabAlign's formula with them; null = the same number of squares per time step "
+                  "placed at random (20 draws)",
+                  f"   {'mask source':<16}{'steps':>7}{'raw R':>8}{'R':>8}{'null':>8}{'R/null':>8}{'R > null':>16}"
                   f"{'tells right/wrong (AUROC, trajectory mean R)':>48}"]
         sources = sorted({s for r in source_run.values() for t in r["turns"] for s in (t.get("R") or {})})
         for source in sources:
-            real, null, per_traj = [], [], []
+            real, null, raw, per_traj = [], [], [], []
             for k, r in source_run.items():
                 if k not in set(keys):
                     continue
-                values = [(t["R"][source], (t.get("R_null") or {}).get(source)) for t in r["turns"]
-                          if (t.get("R") or {}).get(source) is not None]
-                real += [v for v, _ in values]
-                null += [n for _, n in values]
+                values = [(t["R"][source], (t.get("R_null") or {}).get(source), (t.get("R_raw") or {}).get(source))
+                          for t in r["turns"] if (t.get("R") or {}).get(source) is not None]
+                real += [v for v, _, _ in values]
+                null += [n for _, n, _ in values]
+                raw += [w for _, _, w in values if w is not None]
                 if values:
-                    per_traj.append((np.mean([v for v, _ in values]), r["correct"]))
+                    per_traj.append((np.mean([v for v, _, _ in values]), r["correct"]))
             if not real:
                 continue
             pairs = [(v, n) for v, n in zip(real, null) if n is not None]
             up, n, p = tv.sign_test([v - m for v, m in pairs])
             sep = tv.auroc([m for m, _ in per_traj], [c for _, c in per_traj])
-            lines.append(f"   {source:<16}{len(real):>7}{np.mean(real):>8.3f}{np.mean([m for _, m in pairs]):>8.3f}"
-                         f"{np.mean(real) / max(np.mean([m for _, m in pairs]), 1e-9):>8.2f}"
+            null_mean = np.mean([m for _, m in pairs]) if pairs else float("nan")
+            lines.append(f"   {source:<16}{len(real):>7}{np.mean(raw) if raw else float('nan'):>8.3f}{np.mean(real):>8.3f}"
+                         f"{null_mean:>8.3f}{np.mean(real) / max(null_mean, 1e-9):>8.2f}"
                          f"{f'{up}/{n} p={p:.1g}':>16}{sep:>48.3f}")
         lines.append("")
 
