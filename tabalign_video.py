@@ -212,7 +212,7 @@ def clean_target(target, item=None):
     if not target:
         return None
     text = re.sub(r"[<>&*`{}\[\]|]", " ", target)
-    text = re.sub(r"\b(?:target|object|steps?)\s*:?", " ", text, flags=re.I)        # tag words that leaked in
+    text = re.sub(r"\btarget\b\s*:?|\b(?:object|steps?)\s*:", " ", text, flags=re.I)  # tag words that leaked in
     text = re.sub(r"^[\s;,.:]+|[\s;,.:]+$", "", re.sub(r"\s*[;,]\s*(?=[;,])", "", text))
     if item is not None:
         actions = question_actions(item)
@@ -318,7 +318,8 @@ def reasoner_intro(item, times, plan_steps):
              f"Answer the question by calling tools, one call per turn{', following the plan below' if plan_steps else ''}. "
              f"The video has {count} time steps, numbered 1 to {count} ({step_times_text(times)}).",
              TOOLS_DOC,
-             "Reply with exactly one tool call and nothing else, for example f_lookup(dog, 1)."]
+             "Reply with exactly one tool call, for example f_lookup(dog, 1). Only before f_final_answer, first say in "
+             "one or two sentences what the observations show about the question."]
     if plan_steps:
         lines += ["", "Plan:"] + [f"{n}. {describe_step(s)}" for n, s in enumerate(plan_steps, start=1)]
         lines += ["", plan_step_prompt(1, plan_steps[0])]
@@ -331,20 +332,24 @@ def plan_step_prompt(number, step):
     return f"Plan step {number}: {describe_step(step)}"
 
 
-PLAN_DONE = "The plan is done. Based on the observations, call f_final_answer with the letter of the correct option."
+ANSWER_NOW = ("In one or two sentences, say what the observations show about the question, then call f_final_answer "
+              "with the letter of the correct option.")
+PLAN_DONE = "The plan is done. " + ANSWER_NOW
 NO_PLAN_NEXT = "Next call."
-BUDGET_DONE = ("No tool calls are left. Based on the observations, call f_final_answer with the letter of the correct "
-               "option.")
+BUDGET_DONE = "No tool calls are left. " + ANSWER_NOW
 FINAL_FALLBACK = "Answer with the option's letter from the given choices directly."
 
 CALL_START = re.compile(r"\b(f_(?:lookup|compare|filter|sort|aggregate|select|final_answer))\s*\(", re.I)
 
 
 def parse_call(reply):
-    """The first tool call in a reply: (name, argument text), or None."""
-    match = CALL_START.search(reply)
-    if not match:
+    """The tool call in a reply: (name, argument text), or None. The last f_final_answer if there is one (the
+    sentences before it may name other tools), else the first call."""
+    matches = list(CALL_START.finditer(reply))
+    if not matches:
         return None
+    finals = [m for m in matches if m.group(1).lower() == "f_final_answer"]
+    match = finals[-1] if finals else matches[0]
     rest, depth = reply[match.end():], 1
     for i, ch in enumerate(rest):
         depth += (ch == "(") - (ch == ")")
@@ -509,6 +514,30 @@ def describe_box(name, found):
     if notes:
         text += f" ({'; '.join(notes)})"
     return text
+
+
+def facing_side(found):
+    facing = ((found or {}).get("facing") or "").lower()
+    if "left" in facing and "right" not in facing:
+        return "left"
+    if "right" in facing and "left" not in facing:
+        return "right"
+    return None
+
+
+def facing_relation(found_a, found_b, still=0.03):
+    """Whether an object moved the way it faces, from its left/right facing in the two lookups and its left/right
+    movement between them (computed, like a table tool deriving a column); None if either is unclear."""
+    dx = box_center(found_b["box"])[0] - box_center(found_a["box"])[0]
+    sides = [s for s in (facing_side(found_a), facing_side(found_b)) if s]
+    if abs(dx) < still or not sides:
+        return None
+    moved = "right" if dx > 0 else "left"
+    if len(set(sides)) > 1:
+        return f"it moved {moved}, but it faces {sides[0]} in the first and {sides[1]} in the second"
+    if sides[0] == moved:
+        return f"it moved {moved}, the way it faces"
+    return f"it moved {moved}, opposite to the way it faces ({sides[0]})"
 
 
 def facing_text(found):

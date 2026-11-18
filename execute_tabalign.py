@@ -3,14 +3,16 @@ TabAlign's grounded execution for video: Qwen3-VL carries out the plan by callin
 
 Qwen3-VL watches the video exactly as run_attention.py gives it (2 frames per second, at most 32, merged in pairs into
 time steps), reads the question, the options, the tool list and the plan, and then issues one tool call per turn,
-one plan step at a time, at most 6 tool steps, temperature 0.7 (TabAlign Section 4.2, E.5). The tools are the six
+one plan step at a time, at most 6 tool steps, temperature 0.7 (TabAlign Section 4.2, E.5). Before its final answer
+it first says in a sentence or two what the observations show (TabAlign's reasoner writes freely at every step; in
+the smoke run, a reasoner limited to bare calls answered against its own observations). The tools are the six
 plan operations; they look at single frames at full size (TabAlign's image modality) and compute what can be
 computed (positions, movement, order) in code:
 
     f_lookup(object, steps)       Qwen3-VL's grounding on each time step's frame (up to 4): box, state, which way it faces
     f_compare(object, a, b)       both lookups (the nearest time step where the object is found, if not), the movement
-                                  between them in code, and Qwen3-VL on the two frames; two of the question's actions
-                                  are an order question and go to f_sort
+                                  between them and whether it was the way the object faces, in code, and Qwen3-VL on
+                                  the two frames; two of the question's actions are an order question and go to f_sort
     f_filter(event)               yes/no on every time step's frame
     f_sort(event_a, event_b)      which of the two each time step's frame shows; the order in code
     f_aggregate(object)           lookups across the video (up to 6 time steps), the path in code
@@ -61,7 +63,7 @@ FILTER_PROMPT = "Does this image show {event}? Answer yes or no."
 SORT_PROMPT = "Which of these can be seen in this image?\n1. {a}\n2. {b}\n0. neither\nAnswer with the number only."
 SELECT_PROMPT = "Describe what this image shows in one short sentence."
 HALT_TEXT = ("The verifier stopped the run: the last steps did not improve the grounding and added nothing new. "
-             "Based on the observations, call f_final_answer with the letter of the correct option.")
+             + tv.ANSWER_NOW)
 
 
 class Video:
@@ -245,6 +247,9 @@ class Tools:
                 if first[n] and second[n]:
                     parts.append(f"the {n} " + tv.movement_words(first[n]["box"], second[n]["box"]))
                     parts.append(f"the {n} at the first: {self.notes(first[n])}; at the second: {self.notes(second[n])}")
+                    relation = tv.facing_relation(first[n], second[n])
+                    if relation:
+                        parts.append(f"so {relation}")
                 else:
                     parts.append(f"the {n} was not found in both time steps")
             names = list(first)
@@ -289,8 +294,9 @@ class Tools:
                                for s, f in path)
             text = (f"The {obj} through the video: {points}. From step {path[0][0] + 1} to step {path[-1][0] + 1} it "
                     + tv.movement_words(path[0][1]["box"], path[-1][1]["box"]) + ".")
+            relation = tv.facing_relation(path[0][1], path[-1][1])
             return text + (f" At step {path[0][0] + 1}: {self.notes(path[0][1])}; at step {path[-1][0] + 1}: "
-                           f"{self.notes(path[-1][1])}.")
+                           f"{self.notes(path[-1][1])}." + (f" So {relation}." if relation else ""))
         if name == "f_select":
             return " ".join(f"{self.at(s).capitalize()}: {self._ask([s], SELECT_PROMPT, 40)[0]}" for s in args["steps"])
         return f"Error: unknown tool {name}."
@@ -458,7 +464,7 @@ def run_video(reasoner, item, key, plan_steps, args, calibration, masks_args, dy
 
     fallback = False
     if final is None:
-        reply, _ = reasoner.chat(messages, video, sample=True, max_new_tokens=16)
+        reply, _ = reasoner.chat(messages, video, sample=True, max_new_tokens=args.call_tokens)
         call = tv.parse_call(reply)
         parsed = tv.read_call(call[0], call[1], count, item) if call else None
         if call and call[0] == "f_final_answer" and isinstance(parsed, dict):
@@ -508,7 +514,8 @@ def main():
     parser.add_argument("--max-frames", type=int, default=32)
     parser.add_argument("--max-vision-tokens", type=int, default=3072)
     parser.add_argument("--image-side", type=int, default=640, help="Longest side of the frames the tools read")
-    parser.add_argument("--call-tokens", type=int, default=64, help="Most tokens for each tool call")
+    parser.add_argument("--call-tokens", type=int, default=160,
+                        help="Most tokens per turn (a tool call; before the final answer, a sentence or two first)")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
