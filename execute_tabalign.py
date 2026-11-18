@@ -526,7 +526,7 @@ def main():
         for label in json.load(open(path))["labels"]:
             if label["done"] and not label["unsure"] and label.get("approved", True):
                 labels[(label["category"], label["video"])] = label
-    wanted = sets[args.set][:args.limit]
+    wanted = tv.interleave_pairs(sets[args.set])[:args.limit]     # every category early on, for mid-run summaries
     if args.only_labelled:
         wanted = [k for k in wanted if k in labels]
     plans = tv.load_rows(args.out_dir / f"plans_{args.plan}.jsonl") if args.plan != "none" else {}

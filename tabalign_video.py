@@ -128,14 +128,29 @@ def load_questions(data_dir):
 
 
 def load_rows(path):
-    """Rows of a .jsonl file keyed by (category, video), skipping rows with an error."""
+    """Rows of a .jsonl file keyed by (category, video), skipping rows with an error and a last line still being
+    written (so a summary can be read while a run is going)."""
     rows = {}
     if Path(path).exists():
         for line in open(path):
-            row = json.loads(line)
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if "error" not in row:
                 rows[(row["category"], row["video"])] = row
     return rows
+
+
+def interleave_pairs(keys):
+    """Videos with each reversed twin next to its original, taking one pair from each category in turn, so a run read
+    or stopped part way through covers every category."""
+    from itertools import zip_longest
+    groups = {}
+    for category, video in keys:
+        groups.setdefault((category, pair_name(video)), []).append((category, video))
+    by_category = [[sorted(members) for (c, _), members in sorted(groups.items()) if c == category] for category in CATEGORIES]
+    return [key for round_ in zip_longest(*by_category) for members in round_ if members for key in members]
 
 
 def video_seed(video, seed=0):
