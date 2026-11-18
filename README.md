@@ -248,6 +248,42 @@ Step 4 trains Dynin-Omni to carry out the plans the way Qwen3-VL did (`train_dyn
 
 `check_dynin_attention.py` tests whether attention on the right object goes with right answers, using the attention already saved for every video. Check 1 scores Dynin-Omni's attention against the labels, next to a control from other videos' attention. Check 2 moves Dynin-Omni's attention onto Qwen3-VL's grid, takes its top 10% of squares as the target, and asks whether Qwen3-VL's attention lands on that target more when Qwen3-VL answers correctly, per category and within reversed pairs (the same with the labels as the target, for comparison). Results go to `outputs/dynin_attention_check/`.
 
+## TabAlign for video (following the paper step by step)
+
+The steps above trained Dynin-Omni to write Qwen3-VL's reasoning, which [TabAlign](https://arxiv.org/abs/2605.14465) never does: it keeps the diffusion model for understanding and gives execution to the autoregressive model, because diffusion models fail as executors (its Table 6a and Table 7: duplicated actions and format errors, the same failure step 4 ran into). This pipeline redoes the work as the paper does it, with each part mapped to video:
+
+| TabAlign (tables) | Here (DyBench video) |
+|---|---|
+| Table cell | One of Qwen3-VL's video tokens: a 32x32 square of one time step |
+| Planner: LLaDA-8B-Instruct on the question and compact metadata (column names, types) | The same model and decoding (256-token canvas, blocks of 32, 128 steps, guidance 1.5, greedy) on the question, the options, the video's length and its number of time steps. It never sees the frames |
+| Six operations: filter, sort, aggregate, lookup, compare, select | select, lookup, filter, sort, compare, aggregate, over time steps |
+| `[target: col]` → cell mask m_t | `[target: object; steps: ...]` → mask of squares. A column name maps to its cells without vision; an object has to be found in the frames, so **Dynin-Omni grounds it**: its attention for "Find the <target> in the video." (top 25% of each named time step, the median share the human boxes cover) |
+| Reasoner: Qwen3-VL-8B, at most 6 tool steps, temperature 0.7 | The same, calling tools that read single frames at full size (the image modality) and compute positions, movement and order in code |
+| TabAttn: R = attention on m_t / attention on the table, from the position that emits each step; last 4 layers | The same over the video tokens |
+| Logistic calibration fit on terminal correctness, 80/20 early stopping | The same, fit on the validation split's trajectories |
+| In-loop feedback; stagnation halt (< 0.02 better for 2 steps, state unchanged) | The same |
+| Oracle and 20%-noise human masks (Table 6b) | The human labels (labelled test videos) |
+
+**The frame gap.** Dynin-Omni was run on 5 frames centre-cropped to 224x224, while Qwen3-VL sees up to 16 time steps of the whole frame, so its maps covered a third of Qwen3-VL's time steps and none of the sides of wide videos. `ground_dynin.py` gives Dynin-Omni one frame per Qwen3-VL time step (up to 16 frames, 3,136 tokens), either centre-cropped as trained or squeezed whole into 224x224, so its 14x14 grid lines up with Qwen3-VL's. Every target is grounded both ways; `fit_tabattn.py` picks the one that predicts correctness better on the validation split. The summary also compares Dynin-Omni's attention against the human labels, and its own accuracy, with 5 frames and with the matched frames.
+
+**Tools** (`execute_tabalign.py`): `f_lookup(object, step)` is Qwen3-VL's grounding on that frame (box, state, which way it faces); `f_compare(object, a, b)` adds the movement between two lookups, computed in code, and Qwen3-VL's description of the change between the two frames; `f_filter(event)` and `f_sort(event_a, event_b)` ask about every time step's frame and order the events in code; `f_aggregate(object)` tracks the object over up to 6 time steps; `f_select(steps)` describes chosen frames; `f_final_answer(letter)`.
+
+**Sets** (`python tabalign_video.py`, written once to `outputs/tabalign/sets.json`): test is the test split (216 moving direction, 210 reversible dynamics, every pair with a labelled video) plus 100 event-order pairs from the training split, which nothing here trains on, leaving out the 1,000 videos step 3 used (626 videos, about 200 per category as in TabAlign). TabAttn is calibrated on the validation split (260 videos).
+
+**Running it** (on the server, with `.venv` and `.venv-dynin` set up as above):
+
+```bash
+./run_tabalign.sh smoke
+```
+
+checks the whole pipeline on 6 validation and 6 test videos (about 20 minutes) and writes `outputs/tabalign_smoke/results.tar.gz`. Then
+
+```bash
+nohup ./run_tabalign.sh full > tabalign_full.out 2>&1 &
+```
+
+runs everything (many hours; `tail -f outputs/tabalign/log.txt` to follow it; stopped or not, running it again resumes). The configurations, most important first: TabAlign (LLaDA plan, TabAttn with Dynin-Omni masks), the same without the verifier, Qwen3-VL with tools and no plan, Qwen3-VL as the planner, TabAttn with Qwen3-VL's own masks, and with the human masks and 20%-noise human masks (labelled videos only). `summarize_tabalign.py` writes `outputs/tabalign/summary.txt` in the shape of TabAlign's tables: main results with binomial standard deviations and McNemar tests against Qwen3-VL answering directly, planner and reasoning ablations, reward-signal ablation, execution errors (parse errors, plan bypass, halts), plan quality (target hallucination), the frame gap, and whether R tracks grounding against a density-preserving shuffled mask (TabAlign D.4). `outputs/tabalign/results.tar.gz` holds the summary, plans and traces to copy back.
+
 ## OmniTrace
 
 `OmniTrace/` is a copy of [UCSB-AI/OmniTrace](https://github.com/UCSB-AI/OmniTrace) (MIT license, commit `2d18e5a`) with these changes:
