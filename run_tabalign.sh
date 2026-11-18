@@ -10,6 +10,7 @@
 #   ./run_tabalign.sh full      everything (many hours); stop it any time, running it again resumes where it stopped
 #   ./run_tabalign.sh summary   only step 5
 cd "$(dirname "$0")"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True     # less fragmentation on the 24 GB card
 MAIN=.venv/bin/python
 DYNIN=.venv-dynin/bin/python
 MODE=${1:-smoke}

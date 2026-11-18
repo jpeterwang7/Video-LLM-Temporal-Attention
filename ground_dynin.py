@@ -46,6 +46,26 @@ def grounding_prompt(target):
     return f"Find the {target} in the video."
 
 
+@torch.inference_mode()
+def decode_answer(model, canvas, prompt_len, gen_length, first_logits):
+    """Dynin-Omni's mmu_generate as its multiple-choice evaluation runs it (a gen_length canvas, gen_length steps, one
+    block, greedy, lowest-confidence remasking, no guidance, full vocabulary), but with the softmax taken over the
+    answer slots only: mmu_generate takes it over the whole sequence in float64, which with 16 frames needs more
+    memory than the card has left. The first step reuses the logits of the attention pass, which ran on the same
+    canvas."""
+    canvas = canvas.clone()
+    logits = first_logits
+    for step in range(gen_length):
+        if step:
+            logits = model(canvas).logits[0, prompt_len:prompt_len + gen_length].float()
+        confidence, tokens = torch.softmax(logits, dim=-1).max(dim=-1)
+        open_slots = canvas[0, prompt_len:prompt_len + gen_length] == MASK_ID
+        confidence = torch.where(open_slots, confidence, torch.full_like(confidence, -1.0))
+        slot = int(confidence.argmax())
+        canvas[0, prompt_len + slot] = tokens[slot]
+    return canvas[:, prompt_len:prompt_len + gen_length]
+
+
 def plan_targets(out_dir):
     """Every plan target of every video, from both planners' plans."""
     targets = {}
@@ -89,6 +109,7 @@ def main():
     questions = tv.load_questions(args.data_dir)
     targets = plan_targets(args.out_dir)
     root = args.out_dir / "dynin"
+    root.mkdir(parents=True, exist_ok=True)
     results = {mode: root / f"results_{mode}.jsonl" for mode in args.modes}
     done = {mode: tv.load_rows(path) for mode, path in results.items()}
 
@@ -151,9 +172,10 @@ def main():
                         text = build_prompt(item) if q == "question" else grounding_prompt(q)
                         ids = torch.tensor(uni_prompting.text_tokenizer([wrap(text)])["input_ids"], device=device)
                         input_ids = torch.cat([head, ids], dim=1)
+                        prompt_len = input_ids.shape[1]
                         canvas = torch.cat([input_ids, torch.full((1, args.gen_length), MASK_ID, device=device)], dim=1)
-                        with recorder.record(input_ids.shape[1]):
-                            model(canvas)
+                        with recorder.record(prompt_len):
+                            first = model(canvas).logits[0, prompt_len:prompt_len + args.gen_length].float()
                         rows = torch.stack(recorder.rows).numpy()
                         if rows.shape[0] != len(blocks):
                             raise RuntimeError(f"Recorded {rows.shape[0]} attention calls for {len(blocks)} layers")
@@ -161,10 +183,8 @@ def main():
                         last4.append(video_rows[-tv.ATTN_LAYERS:].mean(axis=0))
                         every.append(video_rows.mean(axis=0))
                         if q == "question":
-                            output = model.mmu_generate(input_ids, max_new_tokens=args.gen_length, steps=args.gen_length,
-                                                        block_length=args.gen_length)
-                            response = uni_prompting.text_tokenizer.batch_decode(output[:, input_ids.shape[1]:],
-                                                                                 skip_special_tokens=True)[0].strip()
+                            answer = decode_answer(model, canvas, prompt_len, args.gen_length, first)
+                            response = uni_prompting.text_tokenizer.batch_decode(answer, skip_special_tokens=True)[0].strip()
                             pred = parse_letter(response, item["candidates"])
                             row.update(response=response, pred_letter=pred, correct=pred == row["answer_letter"])
                 out = root / mode / key[0] / (Path(key[1]).stem + ".npz")

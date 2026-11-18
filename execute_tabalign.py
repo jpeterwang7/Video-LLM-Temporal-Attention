@@ -149,7 +149,7 @@ class Reasoner:
         recorder = self.recorder_class(self.layers)
         try:
             with torch.inference_mode():
-                self.model(**inputs)
+                self.model(**inputs, logits_to_keep=1)         # only the attention is needed
         finally:
             recorder.remove()
         return self._video_attention(recorder, inputs, video)
