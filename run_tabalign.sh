@@ -42,7 +42,6 @@ if [ "$MODE" != summary ]; then
     run $MAIN fit_tabattn.py --run "$OUT/runs/$CAL/llada_none" --out-dir "$OUT"
     run $MAIN execute_tabalign.py --set $TEST --plan llada --reward dynin --out-dir "$OUT"
     run $MAIN execute_tabalign.py --set $TEST --plan llada --reward none --record-qwen --out-dir "$OUT"
-    run $MAIN execute_tabalign.py --set $TEST --plan none --reward none --out-dir "$OUT"
     run $MAIN execute_tabalign.py --set $TEST --plan qwen --reward dynin --out-dir "$OUT"
     run $MAIN execute_tabalign.py --set $TEST --plan llada --reward qwen --out-dir "$OUT"
     run $MAIN execute_tabalign.py --set $TEST --plan llada --reward oracle --only-labelled --out-dir "$OUT"
