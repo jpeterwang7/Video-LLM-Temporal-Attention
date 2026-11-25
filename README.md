@@ -157,6 +157,15 @@ Writes two figures to `outputs/qwen3vl_8b/analysis/time_layer/`, each as a 3D su
 
 `./run_labelled_models.sh` (on the server, with every model's environment set up) runs the models on every video in `labels/labels_peter*.json`, skipping videos they have already answered. It then writes `outputs/model_comparison/accuracy_labelled.{txt,csv,png}` from `labelled_accuracy.py`, and each model's charts to `<run-dir>/analysis/time_layer_250/`, and bundles the accuracy files and tracking charts into `outputs/labelled_250_results.tar.gz`. Accuracy uses every labelled video, and is also given for the API-labelled videos alone, because the hand-labelled ones over-sample Qwen3-VL's mistakes. The charts leave out unfinished and unapproved labels, and any video passed to `plot_time_layer.py --skip`.
 
+`plot_time_layer.py` gives each model its own colour scale, so the same red means different values in two models' charts. `compare_time_layer.py` draws the tracking view for several models side by side on one colour and height scale, a column per model and a row per category, each model with its own labels (the converted ones where the model sees other frames). `run_labelled_models.sh` runs it for Qwen3-VL and Dynin-Omni; on its own:
+
+```bash
+python compare_time_layer.py --model outputs/qwen3vl_8b labels/labels_peter*.json \
+    --model outputs/dynin_omni outputs/dynin_omni/labels/labels_peter*.json --skip video_14052_reversed.mp4
+```
+
+It writes `outputs/model_comparison/tracking_qwen_vs_dynin.png`.
+
 ### Working on a laptop
 
 `python export_labelled_attention.py labels/*.json` (on the machine with the attention files) bundles `results.jsonl` and the attention files of the labelled videos into `outputs/labelled_attention.tar.gz`. Unpack it inside `outputs/` on the laptop (`tar xzf labelled_attention.tar.gz`) and the label analyses that don't need other videos run there. `score_attention.py`'s control needs other videos' attention, so it still runs on the server.

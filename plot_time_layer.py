@@ -69,11 +69,18 @@ def time_layer_maps(attention, mask, bins):
     return share_map, lift_map
 
 
-def draw(groups, key, title, subtitle, colour_label, path, bins):
-    fig = plt.figure(figsize=(6.2 * len(groups), 10.5))
+def draw(groups, key, title, subtitle, colour_label, path, bins, ncols=None):
+    """One column per group, a 3D surface over a heat map, all groups on one colour and height scale. With ncols,
+    the groups wrap into rows of ncols columns (compare_time_layer.py: a column per model, a row per category)."""
+    ncols = ncols or len(groups)
+    nrows = math.ceil(len(groups) / ncols)
+    height = 10.5 * nrows
+    fig = plt.figure(figsize=(6.2 * ncols, height))
     fig.patch.set_facecolor(SURFACE)
-    fig.text(0.02, 0.985, title, fontsize=14, fontweight="bold", color=INK, va="top")
-    fig.text(0.02, 0.957, textwrap.fill(subtitle, 150), fontsize=10, color=INK_SECONDARY, va="top")
+    fig.text(0.02, 1 - 0.1575 / height, title, fontsize=14, fontweight="bold", color=INK, va="top")
+    subtitle = textwrap.fill(subtitle, 150)
+    header = 0.735 + 0.17 * max(0, subtitle.count("\n") - 1)  # inches above the panels; more for a longer subtitle
+    fig.text(0.02, 1 - 0.4515 / height, subtitle, fontsize=10, color=INK_SECONDARY, va="top")
 
     maps = {name: np.nanmean(np.stack([v[key] for v in videos]), axis=0) for name, videos in groups.items()}
     low = min(np.nanmin(m) for m in maps.values())
@@ -87,7 +94,8 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         m = maps[name]
         layers = np.arange(1, m.shape[0] + 1)
 
-        ax3 = fig.add_subplot(2, len(groups), i + 1, projection="3d")
+        row, col = divmod(i, ncols)
+        ax3 = fig.add_subplot(2 * nrows, ncols, 2 * row * ncols + col + 1, projection="3d")
         X, Y = np.meshgrid(centres, layers)
         ax3.plot_surface(X, Y, m, facecolors=DIVERGING(norm(np.nan_to_num(m, nan=1.0))), shade=False,
                          rstride=1, cstride=1, linewidth=0.3, edgecolor=(0.5, 0.5, 0.5, 0.25), antialiased=True)
@@ -102,7 +110,7 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         for axis in (ax3.xaxis, ax3.yaxis, ax3.zaxis):
             axis.set_pane_color((0.99, 0.99, 0.98, 1))
 
-        ax2 = fig.add_subplot(2, len(groups), len(groups) + i + 1)
+        ax2 = fig.add_subplot(2 * nrows, ncols, (2 * row + 1) * ncols + col + 1)
         image = ax2.imshow(m, aspect="auto", origin="lower", cmap=DIVERGING, norm=norm,
                            extent=(0, 100, 0.5, m.shape[0] + 0.5), interpolation="nearest")
         ax2.set_xticks(centres, tick_labels, fontsize=8, color=MUTED)
@@ -117,9 +125,37 @@ def draw(groups, key, title, subtitle, colour_label, path, bins):
         bar.ax.tick_params(labelsize=8, colors=MUTED)
         bar.outline.set_visible(False)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.tight_layout(rect=(0, 0, 1, 1 - header / height))
     fig.savefig(path, dpi=160, facecolor=SURFACE)
     plt.close(fig)
+
+
+def load_groups(run_dir, label_paths, bins, skip=()):
+    """Category title -> per-video maps for the labelled videos the run answered, and how many had no result."""
+    results = {}
+    with open(run_dir / "results.jsonl") as f:
+        for line in f:
+            row = json.loads(line)
+            if "error" not in row:
+                results[(row["category"], row["video"])] = row
+
+    groups = {}
+    missing = 0
+    for path in label_paths:
+        for label in json.load(open(path))["labels"]:
+            if not label["done"] or label["unsure"] or not label.get("approved", True) or label["video"] in skip:
+                continue
+            result = results.get((label["category"], label["video"]))
+            if result is None:
+                missing += 1
+                continue
+            if "frames_used" in label and label["frames_used"] != result.get("frames_used", label["frames_used"]):
+                raise RuntimeError(f"{label['video']}: the label and the attention use different frames")
+            attention = np.load(run_dir / result["attention_file"])["vision_attention"][0].astype(np.float64)
+            share, lift = time_layer_maps(attention, label_mask(label), bins)
+            groups.setdefault(TITLES[label["category"]], []).append(
+                {"share": share, "lift": lift, "correct": bool(result["correct"])})
+    return {name: groups[name] for name in TITLES.values() if name in groups}, missing
 
 
 def main():
@@ -132,30 +168,7 @@ def main():
     parser.add_argument("--skip", nargs="*", default=[], help="Videos to leave out")
     args = parser.parse_args()
 
-    results = {}
-    with open(args.run_dir / "results.jsonl") as f:
-        for line in f:
-            row = json.loads(line)
-            if "error" not in row:
-                results[(row["category"], row["video"])] = row
-
-    groups = {}
-    missing = 0
-    for path in args.labels:
-        for label in json.load(open(path))["labels"]:
-            if not label["done"] or label["unsure"] or not label.get("approved", True) or label["video"] in args.skip:
-                continue
-            result = results.get((label["category"], label["video"]))
-            if result is None:
-                missing += 1
-                continue
-            if "frames_used" in label and label["frames_used"] != result.get("frames_used", label["frames_used"]):
-                raise RuntimeError(f"{label['video']}: the label and the attention use different frames")
-            attention = np.load(args.run_dir / result["attention_file"])["vision_attention"][0].astype(np.float64)
-            share, lift = time_layer_maps(attention, label_mask(label), args.bins)
-            groups.setdefault(TITLES[label["category"]], []).append(
-                {"share": share, "lift": lift, "correct": bool(result["correct"])})
-    groups = {name: groups[name] for name in TITLES.values() if name in groups}
+    groups, missing = load_groups(args.run_dir, args.labels, args.bins, args.skip)
     total = sum(len(v) for v in groups.values())
     print(f"Loaded {total} labelled videos" + (f"; WARNING: {missing} have no result and were left out" if missing else ""))
 

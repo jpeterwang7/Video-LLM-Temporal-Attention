@@ -20,8 +20,10 @@ SKIP="--skip video_14052_reversed.mp4 --out-name time_layer_250"
 .venv/bin/python plot_time_layer.py $(converted vidlada_8b) --run-dir outputs/vidlada_8b $SKIP
 .venv/bin/python plot_time_layer.py $(converted dynin_omni) --run-dir outputs/dynin_omni $SKIP
 .venv/bin/python plot_time_layer.py $ORIGINAL --run-dir outputs/dreamvl_7b $SKIP
+.venv/bin/python compare_time_layer.py --model outputs/qwen3vl_8b $ORIGINAL \
+    --model outputs/dynin_omni $(converted dynin_omni) --skip video_14052_reversed.mp4
 
 tar czf outputs/labelled_250_results.tar.gz -C outputs model_comparison/accuracy_labelled.txt \
-    model_comparison/accuracy_labelled.csv model_comparison/accuracy_labelled.png \
+    model_comparison/accuracy_labelled.csv model_comparison/accuracy_labelled.png model_comparison/tracking_qwen_vs_dynin.png \
     {qwen3vl_8b,llava_video_7b,vidlada_8b,dynin_omni,dreamvl_7b}/analysis/time_layer_250/tracking_the_object.png
 echo "Bundle: outputs/labelled_250_results.tar.gz"
