@@ -9,7 +9,9 @@ against each answer option. Nothing is taken from the dataset's categories or it
     JSON, what that option claims the video could confirm: an order in time (two or more moments: actions one after
     another, something before or after a thing the question names, the states before and after a change) and a
     direction across the picture for its object (left, right, up, down, or still; the directions are taken from the
-    option's own words when it names any). An option that claims neither gets no timing or motion evidence.
+    option's own words when it names any). An option that claims neither is asked a second, shorter question: is it
+    an action that changes something, and how does that look just before and just after? If so, those two states
+    are its order in time. An option that claims nothing gets no timing or motion evidence.
  2. Grounding (ground_dynin.py --claims). Dynin-Omni attends to the video for the question, the main object ("Find
     the <object> in the video.") and each moment ("Find this in the video: <moment>."), on whole frames, one per
     Qwen3-VL time step.
@@ -69,7 +71,7 @@ OPTION_PROMPT = """Here is a question about a video and one possible answer. Do 
 
 - "object": the main thing the answer is about, as a short noun phrase, or null.
 - "moves": if the answer says that thing moves across the picture, the directions it names ("left", "right", "up", "down"); ["still"] if it says the thing does not move; otherwise []. Forward, backward and in reverse are not directions across the picture: leave them out.
-- "order": if the answer says things happen in an order, short phrases for them in that order (at least two), each something one frame could show. An action that changes something also says an order: the state before it, then the state after it. Otherwise [].
+- "order": if the answer says things happen in an order, short phrases for them in that order (at least two), each something one frame could show. Otherwise [].
 
 Example
 Question: What does the woman do after she opens the door?
@@ -88,17 +90,28 @@ JSON: {"object": "the red ball", "moves": ["right", "up"], "order": []}
 
 Example
 Question: Which of these actions happened in the video?
-Answer: filling something
-JSON: {"object": "something", "moves": [], "order": ["something is empty", "something is full"]}
-
-Example
-Question: Which of these actions happened in the video?
 Answer: none of the above
 JSON: {"object": null, "moves": [], "order": []}
 
 Now this one.
 Question: <QUESTION>
 Answer: <ANSWER>
+JSON:"""
+CHANGE_PROMPT = """Does this phrase describe an action that changes how something looks or where it is? If it does, write how that thing looks just before the action and just after it, as two short phrases that one frame could each show. If it does not, write null for both.
+
+Phrase: inflating a balloon
+JSON: {"before": "the balloon is flat", "after": "the balloon is round and full of air"}
+
+Phrase: filling something
+JSON: {"before": "something is empty", "after": "something is full"}
+
+Phrase: a dog running in a park
+JSON: {"before": null, "after": null}
+
+Phrase: none of the above
+JSON: {"before": null, "after": null}
+
+Phrase: <PHRASE>
 JSON:"""
 DIRECTION_WORDS = {"left": r"\bleft(ward)?s?\b", "right": r"\bright(ward)?s?\b", "up": r"\bup(ward)?s?\b",
                    "down": r"\bdown(ward)?s?\b"}
@@ -117,19 +130,42 @@ def digest(text):
     return hashlib.sha1(text.encode()).hexdigest()[:16]
 
 
+def change_prompt(option):
+    """The second question, for an option that claims no order and no movement: is it an action that changes
+    something, and how does that look just before and just after it?"""
+    return CHANGE_PROMPT.replace("<PHRASE>", option.strip())
+
+
+def first_json(reply):
+    """The first JSON object in a reply (anything around it ignored), or None."""
+    start = (reply or "").find("{")
+    if start < 0:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(reply[start:])[0]
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_change(reply):
+    """[state before, state after] from the second question's reply; [] if it names no change."""
+    data = first_json(reply)
+    if not isinstance(data, dict):
+        return []
+    states = [data.get("before"), data.get("after")]
+    if not all(isinstance(s, str) and s.strip() and s.strip().lower() not in ("null", "none") for s in states):
+        return []
+    before, after = (s.strip().rstrip(".") for s in states)
+    return [before, after] if before.lower() != after.lower() else []
+
+
 def parse_option(reply, option):
     """What one option claims, from the reader's JSON reply: {"object", "moves", "order"}. The reader decides whether
     the option is about movement across the picture; the directions are then the ones the option's own words name
     (the reader's only if it names none), so a misread cannot swap left and right. An order needs two or more
     different moments. Anything unusable is dropped."""
     empty = {"object": None, "moves": [], "order": []}
-    start = (reply or "").find("{")
-    if start < 0:
-        return empty
-    try:
-        data, _ = json.JSONDecoder().raw_decode(reply[start:])     # the first JSON object; anything after is ignored
-    except json.JSONDecodeError:
-        return empty
+    data = first_json(reply)
     if not isinstance(data, dict):
         return empty
     thing = data.get("object")
@@ -153,12 +189,16 @@ def parse_option(reply, option):
     return {"object": thing, "moves": sorted(moves), "order": order}
 
 
-def build_claim(item, replies):
-    """What every option of one question claims, from the reader's reply for each option:
+def build_claim(item, replies, changes=None):
+    """What every option of one question claims, from the reader's reply for each option and, for an option that
+    claimed neither an order nor a movement, the second question's reply (changes; None where it was not asked):
     {"object": the question's main object (the one most options name), "options": {letter: {"object", "moves",
     "order"}}}. Options claiming nothing are left out; an option that moves without naming its object takes the
     main one."""
     parsed = [parse_option(reply, option) for reply, option in zip(replies, item["candidates"])]
+    for said, change in zip(parsed, changes or [None] * len(parsed)):
+        if change is not None and not said["order"] and not said["moves"]:
+            said["order"] = parse_change(change)        # an action: the state before it, then the state after
     objects = [p["object"] for p in parsed if p["object"]]
     main = max(objects, key=lambda o: (objects.count(o), -objects.index(o))) if objects else None
     options = {}
@@ -362,8 +402,9 @@ def wanted_videos(args, names):
 
 
 def extract(args):
-    """Step 1: what every option of every question claims, from the text alone, one option at a time. Options worded
-    the same (twins, repeated questions) share one reply."""
+    """Step 1: what every option of every question claims, from the text alone. Each option is read on its own; an
+    option that claims neither an order nor a movement is then asked whether it is an action that changes something,
+    and how that looks before and after. Identical prompts (twins, repeated questions and options) share one reply."""
     import torch
     from execute_tabalign import Reasoner
 
@@ -372,57 +413,86 @@ def extract(args):
     path = args.out_dir / "dynin_evidence" / "claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = tv.load_rows(path)
-    prompts = {k: [option_prompt(questions[k], i) for i in range(len(questions[k]["candidates"]))] for k in wanted}
-    digests = {k: [digest(p) for p in prompts[k]] for k in wanted}
-    replies = {d: r for row in rows.values() for d, r in zip(row.get("digests") or [], row.get("replies") or [])}
-    current = [k for k in wanted if k in rows and rows[k].get("digests") == digests[k]]    # read with these prompts
-    reparse = [k for k in current if rows[k].get("claim") != build_claim(questions[k], rows[k]["replies"])]
-    todo = [k for k in wanted if k not in current]
-    print(f"{len(wanted)} questions: {len(current) - len(reparse)} already read, {len(reparse)} to parse again, "
-          f"{len(todo)} to read", flush=True)
+    replies = {}
+    for row in rows.values():
+        for d, r in zip((row.get("digests") or []) + (row.get("change_digests") or []),
+                        (row.get("replies") or []) + (row.get("change_replies") or [])):
+            if d:
+                replies[d] = r
+    first_prompts = {k: [option_prompt(questions[k], i) for i in range(len(questions[k]["candidates"]))] for k in wanted}
 
-    def write(keys):
+    def second_prompts(k):
+        """The before-and-after question for each option whose first reading claims nothing; None for the others."""
+        out = []
+        for prompt, option in zip(first_prompts[k], questions[k]["candidates"]):
+            said = parse_option(replies[digest(prompt)], option)
+            out.append(None if said["order"] or said["moves"] else change_prompt(option))
+        return out
+
+    def missing(k):
+        """Prompts still unanswered for k: its options first, then the before-and-after questions they call for."""
+        first = [p for p in first_prompts[k] if digest(p) not in replies]
+        return first or [p for p in second_prompts(k) if p is not None and digest(p) not in replies]
+
+    def row_for(k):
+        seconds = second_prompts(k)
+        firsts = [replies[digest(p)] for p in first_prompts[k]]
+        changes = [None if p is None else replies[digest(p)] for p in seconds]
+        return {"category": k[0], "video": k[1], "digests": [digest(p) for p in first_prompts[k]], "replies": firsts,
+                "change_digests": [None if p is None else digest(p) for p in seconds], "change_replies": changes,
+                "claim": build_claim(questions[k], firsts, changes)}
+
+    todo, counts = list(wanted), {"written": 0}
+
+    def write_ready():
+        nonlocal todo
+        ready = {k for k in todo if not missing(k)}
         with open(path, "a") as f:
-            for k in keys:
-                answers = [replies[d] for d in digests[k]]
-                claim = build_claim(questions[k], answers)
-                f.write(json.dumps({"category": k[0], "video": k[1], "digests": digests[k], "replies": answers,
-                                    "claim": claim}) + "\n")
-                print(f"   {k[0]}/{k[1]}: {describe(claim)}"
-                      + ("" if claim["options"] else f" (option A's reply: {' '.join(answers[0].split())[:160]!r})"),
-                      flush=True)
+            for k in [k for k in todo if k in ready]:
+                row = row_for(k)
+                if rows.get(k) != row:      # new, or read differently from before
+                    f.write(json.dumps(row) + "\n")
+                    rows[k] = row
+                    counts["written"] += 1
+                    shown = "" if row["claim"]["options"] else \
+                        " (replies: " + " | ".join(" ".join((r or "").split())[:70] for r in row["replies"]) + ")"
+                    print(f"   {k[0]}/{k[1]}: {describe(row['claim'])}{shown}", flush=True)
+        todo = [k for k in todo if k not in ready]
 
-    write(reparse)                      # same replies, read by the current parser
-    ready = [k for k in todo if all(d in replies for d in digests[k])]
-    write(ready)
-    todo = [k for k in todo if k not in ready]
+    write_ready()
+    print(f"{len(wanted)} questions: {len(wanted) - len(todo)} read ({counts['written']} new or read differently), "
+          f"{len(todo)} to read", flush=True)
     if not todo:
         return
-    pending, text_of = [], {}
-    for k in todo:
-        for d, p in zip(digests[k], prompts[k]):
-            if d not in replies and d not in text_of:
-                pending.append(d)
-                text_of[d] = p
-
     reasoner = Reasoner(args.model, args.max_vision_tokens)
     tokenizer = reasoner.processor.tokenizer
     tokenizer.padding_side = "left"                      # generation continues each prompt at the right edge
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    for start in range(0, len(pending), args.batch):
-        batch = pending[start:start + args.batch]
-        texts = [reasoner.processor.apply_chat_template([{"role": "user", "content": [{"type": "text", "text": text_of[d]}]}],
-                                                        add_generation_prompt=True, tokenize=False) for d in batch]
-        inputs = reasoner.processor(text=texts, padding=True, return_tensors="pt").to(reasoner.model.device)
-        with torch.inference_mode():
-            out = reasoner.model.generate(**inputs, max_new_tokens=args.extract_tokens, do_sample=False,
-                                          temperature=None, top_p=None, top_k=None, pad_token_id=pad)
-        for d, sequence in zip(batch, out):
-            replies[d] = tokenizer.decode(sequence[inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-        print(f"[{min(start + args.batch, len(pending))}/{len(pending)} differently worded options]", flush=True)
-        ready = [k for k in todo if all(d in replies for d in digests[k])]
-        write(ready)
-        todo = [k for k in todo if k not in ready]
+    round_ = 0
+    while todo:
+        round_ += 1
+        pending, seen = [], set()
+        for k in todo:
+            for p in missing(k):
+                if digest(p) not in seen:
+                    seen.add(digest(p))
+                    pending.append(p)
+        if not pending:
+            break
+        for start in range(0, len(pending), args.batch):
+            batch = pending[start:start + args.batch]
+            texts = [reasoner.processor.apply_chat_template([{"role": "user", "content": [{"type": "text", "text": p}]}],
+                                                            add_generation_prompt=True, tokenize=False) for p in batch]
+            inputs = reasoner.processor(text=texts, padding=True, return_tensors="pt").to(reasoner.model.device)
+            with torch.inference_mode():
+                out = reasoner.model.generate(**inputs, max_new_tokens=args.extract_tokens, do_sample=False,
+                                              temperature=None, top_p=None, top_k=None, pad_token_id=pad)
+            for p, sequence in zip(batch, out):
+                replies[digest(p)] = tokenizer.decode(sequence[inputs["input_ids"].shape[1]:],
+                                                      skip_special_tokens=True).strip()
+            print(f"[round {round_}: {min(start + args.batch, len(pending))}/{len(pending)} prompts]", flush=True)
+            write_ready()
+    print(f"Claims read: {counts['written']} questions written to {path}", flush=True)
 
 def run(args):
     """Step 3: Qwen3-VL's letter scores on the plain video and both zooms, and its own attention for the controls."""
