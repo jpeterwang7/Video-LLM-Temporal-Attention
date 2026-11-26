@@ -19,6 +19,11 @@
 #   ./run_tabalign.sh steer       strengths 3, 10, 30 on the 260 validation videos, then the best one on the 620 test
 #                                 videos: unsteered, Dynin-Omni's region, a random region of the same size, the human
 #                                 boxes (about 2 hours); stop it any time, running it again resumes
+#
+# Reversal-consistent answering (reversal_answer.py): each video answered as given and played backward, the options
+# scored so that the two readings must agree:
+#   ./run_tabalign.sh reverse-smoke  the 6 debugging videos (a few minutes), to check it runs
+#   ./run_tabalign.sh reverse        the 260 validation and 620 test videos (about 1 hour); resumes if stopped
 cd "$(dirname "$0")"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True     # less fragmentation on the 24 GB card
 MAIN=.venv/bin/python
@@ -26,8 +31,8 @@ DYNIN=.venv-dynin/bin/python
 MODE=${1:-smoke}
 case "$MODE" in
     smoke) CAL=smoke_calib; TEST=smoke_test; OUT=outputs/tabalign_smoke ;;
-    full|summary|preview|steer|steer-smoke) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
-    *) echo "Usage: $0 smoke|preview [N]|full|summary|steer-smoke|steer"; exit 1 ;;
+    full|summary|preview|steer|steer-smoke|reverse|reverse-smoke) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
+    *) echo "Usage: $0 smoke|preview [N]|full|summary|steer-smoke|steer|reverse-smoke|reverse"; exit 1 ;;
 esac
 mkdir -p "$OUT"
 LOG="$OUT/log.txt"
@@ -70,6 +75,24 @@ if [ "$MODE" = steer ]; then
     run $MAIN steer_qwen.py --set $TEST --exclude-set smoke_test --report --out-dir "$OUT"
     tar czf "$OUT/steer_results.tar.gz" -C "$OUT" steer
     echo "Results to copy back: $OUT/steer_results.tar.gz"
+    exit 0
+fi
+
+if [ "$MODE" = reverse-smoke ]; then
+    run $MAIN reversal_answer.py --check-mirrors
+    run $MAIN reversal_answer.py --set smoke_test --out-dir "$OUT"
+    run $MAIN reversal_answer.py --set smoke_test --report --out-dir "$OUT"
+    echo "REVERSE SMOKE DONE: table above, in $OUT/reversal/smoke_test/summary.txt"
+    exit 0
+fi
+
+if [ "$MODE" = reverse ]; then
+    run $MAIN reversal_answer.py --set $CAL --out-dir "$OUT"
+    run $MAIN reversal_answer.py --set $CAL --report --out-dir "$OUT"
+    run $MAIN reversal_answer.py --set $TEST --exclude-set smoke_test --out-dir "$OUT"
+    run $MAIN reversal_answer.py --set $TEST --exclude-set smoke_test --report --out-dir "$OUT"
+    tar czf "$OUT/reversal_results.tar.gz" -C "$OUT" reversal
+    echo "Results to copy back: $OUT/reversal_results.tar.gz"
     exit 0
 fi
 
