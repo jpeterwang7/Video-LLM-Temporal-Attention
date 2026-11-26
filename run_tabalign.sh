@@ -12,6 +12,13 @@
 #                                 calibration; about 20 minutes for 30
 #   ./run_tabalign.sh full        everything (many hours); stop it any time, running it again resumes where it stopped
 #   ./run_tabalign.sh summary     only step 5
+#
+# After the full run, steering Qwen3-VL's attention onto Dynin-Omni's regions while it answers directly
+# (steer_qwen.py; uses the full run's Dynin-Omni maps):
+#   ./run_tabalign.sh steer-smoke the 6 debugging videos, every region at strength 10 (a few minutes), to check it runs
+#   ./run_tabalign.sh steer       strengths 3, 10, 30 on the 260 validation videos, then the best one on the 620 test
+#                                 videos: unsteered, Dynin-Omni's region, a random region of the same size, the human
+#                                 boxes (about 2 hours); stop it any time, running it again resumes
 cd "$(dirname "$0")"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True     # less fragmentation on the 24 GB card
 MAIN=.venv/bin/python
@@ -19,8 +26,8 @@ DYNIN=.venv-dynin/bin/python
 MODE=${1:-smoke}
 case "$MODE" in
     smoke) CAL=smoke_calib; TEST=smoke_test; OUT=outputs/tabalign_smoke ;;
-    full|summary|preview) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
-    *) echo "Usage: $0 smoke|preview [N]|full|summary"; exit 1 ;;
+    full|summary|preview|steer|steer-smoke) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
+    *) echo "Usage: $0 smoke|preview [N]|full|summary|steer-smoke|steer"; exit 1 ;;
 esac
 mkdir -p "$OUT"
 LOG="$OUT/log.txt"
@@ -43,6 +50,26 @@ if [ "$MODE" = preview ]; then
     run $MAIN execute_tabalign.py --set $TEST --plan llada --reward none --limit $N --exclude-set smoke_test \
         --run-name preview --out-dir "$OUT"
     echo "PREVIEW DONE: accuracy above; traces in $OUT/runs/$TEST/preview/traces.jsonl"
+    exit 0
+fi
+
+if [ "$MODE" = steer-smoke ]; then
+    run $MAIN steer_qwen.py --set smoke_test --configs none dynin:10 random:10 human:10 --out-dir "$OUT"
+    run $MAIN steer_qwen.py --set smoke_test --report --out-dir "$OUT"
+    echo "STEER SMOKE DONE: table above, in $OUT/steer/smoke_test/summary.txt"
+    exit 0
+fi
+
+if [ "$MODE" = steer ]; then
+    run $MAIN steer_qwen.py --set $CAL --configs none dynin:3 dynin:10 dynin:30 --out-dir "$OUT"
+    run $MAIN steer_qwen.py --set $CAL --report --out-dir "$OUT"
+    ALPHA=$($MAIN steer_qwen.py --set $CAL --best dynin --out-dir "$OUT") || { echo "FAILED: choosing the strength" | tee -a "$LOG"; exit 1; }
+    echo "=== $(date '+%F %T') strength chosen on $CAL: $ALPHA" | tee -a "$LOG"
+    run $MAIN steer_qwen.py --set $TEST --exclude-set smoke_test --configs none dynin:$ALPHA random:$ALPHA human:$ALPHA \
+        --out-dir "$OUT"
+    run $MAIN steer_qwen.py --set $TEST --exclude-set smoke_test --report --out-dir "$OUT"
+    tar czf "$OUT/steer_results.tar.gz" -C "$OUT" steer
+    echo "Results to copy back: $OUT/steer_results.tar.gz"
     exit 0
 fi
 
