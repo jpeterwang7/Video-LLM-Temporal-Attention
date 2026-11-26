@@ -21,8 +21,13 @@ decoding), next to the 5-frame run in outputs/dynin_omni.
 Writes <out-dir>/dynin/<mode>/<category>/<video>.npz (queries, last4 and all: [queries, T, 14, 14] attention averaged
 over the last 4 and over all layers, frame_times, crop) and <out-dir>/dynin/results_<mode>.jsonl.
 
+With --claims it grounds what each question's options claim instead of the plan targets (answer_with_dynin.py
+--extract): the question, its main object ("Find the <object> in the video.") and each moment the options put in
+order ("Find this in the video: <moment>."), into <out-dir>/dynin_claims/<mode>/..., for answer_with_dynin.py.
+
 Usage (Dynin-Omni environment, after plan_tabalign.py):
     python ground_dynin.py --set calib test
+    python ground_dynin.py --claims outputs/tabalign/dynin_evidence/claims.jsonl --set calib test --modes squeeze
 """
 import argparse
 import json
@@ -85,6 +90,9 @@ def main():
     parser.add_argument("--set", nargs="+", default=["calib", "test"])
     parser.add_argument("--limit", type=int, help="Only the first N videos of each set")
     parser.add_argument("--modes", nargs="+", default=MODES, choices=MODES)
+    parser.add_argument("--claims", type=Path,
+                        help="Ground what each question's options claim (answer_with_dynin.py --extract; into "
+                             "dynin_claims/), not the plan targets")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
@@ -107,8 +115,17 @@ def main():
     for name in args.set:        # in the executor's order
         wanted += [k for k in tv.interleave_pairs(sets[name])[:args.limit] if k not in wanted]
     questions = tv.load_questions(args.data_dir)
-    targets = plan_targets(args.out_dir)
-    root = args.out_dir / "dynin"
+    if args.claims:          # the question, its main object and the moments its options name
+        from answer_with_dynin import claim_queries
+        claims = tv.load_rows(args.claims)
+        wanted = [k for k in wanted if k in claims]
+        prompts = {k: dict(claim_queries(claims[k]["claim"])) for k in wanted}
+        targets = {k: list(prompts[k]) for k in wanted}
+        root = args.out_dir / "dynin_claims"
+    else:
+        prompts = {}
+        targets = plan_targets(args.out_dir)
+        root = args.out_dir / "dynin"
     root.mkdir(parents=True, exist_ok=True)
     results = {mode: root / f"results_{mode}.jsonl" for mode in args.modes}
     done = {mode: tv.load_rows(path) for mode, path in results.items()}
@@ -147,7 +164,7 @@ def main():
         steps = len(frames) // 2
         picked = [2 * t for t in range(steps)]
         height, width = frames[0].shape[:2]
-        queries = ["question"] + targets.get(key, [])
+        queries = list(targets[key]) if args.claims else ["question"] + targets.get(key, [])
         for mode in args.modes:
             if finished(key, mode):
                 continue
@@ -169,7 +186,8 @@ def main():
                                       special["<|sot|>"]], dim=1)
                     last4, every = [], []
                     for q in queries:
-                        text = build_prompt(item) if q == "question" else grounding_prompt(q)
+                        text = build_prompt(item) if q == "question" else \
+                            prompts[key][q] if args.claims else grounding_prompt(q)
                         ids = torch.tensor(uni_prompting.text_tokenizer([wrap(text)])["input_ids"], device=device)
                         input_ids = torch.cat([head, ids], dim=1)
                         prompt_len = input_ids.shape[1]
