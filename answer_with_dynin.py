@@ -5,11 +5,11 @@ Steering Qwen3-VL's attention toward Dynin-Omni's regions (steer_qwen.py) change
 attention says more than where to look: when things happen and where they go. This turns it into evidence for or
 against each answer option. Nothing is taken from the dataset's categories or its wording of the options:
 
- 1. Claims (--extract). Qwen3-VL reads only the question and its options (no video, no answer) and writes, as JSON,
-    what each option claims that the video could confirm: an order in time (two or more moments: actions one after
+ 1. Claims (--extract). Qwen3-VL reads the question with one option at a time (no video, no answer) and writes, as
+    JSON, what that option claims the video could confirm: an order in time (two or more moments: actions one after
     another, something before or after a thing the question names, the states before and after a change) and a
-    direction across the picture for the question's main object (left, right, up, down, or still). An option that
-    claims neither gets no timing or motion evidence.
+    direction across the picture for its object (left, right, up, down, or still; the directions are taken from the
+    option's own words when it names any). An option that claims neither gets no timing or motion evidence.
  2. Grounding (ground_dynin.py --claims). Dynin-Omni attends to the video for the question, the main object ("Find
     the <object> in the video.") and each moment ("Find this in the video: <moment>."), on whole frames, one per
     Qwen3-VL time step.
@@ -65,68 +65,64 @@ PENALTY = 1.0                   # L2 penalty on the evidence weights (evidence s
 DIRECTIONS = ("left", "right", "up", "down", "still")
 MAX_MOMENTS = 6
 
-EXTRACT_PROMPT = """Here is a multiple-choice question about a video. Do not answer it. Write down, as JSON, what each option claims that the video could show.
+OPTION_PROMPT = """Here is a question about a video and one possible answer. Do not judge whether the answer is right. Write down, as JSON, what this answer claims the video shows.
 
-- "object": the main thing the question is about (the one that moves, if the options describe movement), as a short noun phrase, or null.
-- "moments": short phrases for the events or states whose order in time the options are about: actions that happen one after another, or something that happens before or after a thing the question names. An option naming an action that changes something also claims an order: the state before the change, then the state after it ("plugging in the cable" goes from "the cable is unplugged" to "the cable is plugged in"; "a flower blooming" from "the flower is closed" to "the flower is open"). Each moment should be something one frame could show. [] if no option is about an order in time or a change.
-- "options": for each option letter, {"order": [...], "moves": [...]}.
-  "order" lists indices into "moments" in the order this option says they happen (at least two), or [].
-  "moves" lists the directions across the picture this option says the object moves ("left", "right", "up", "down"), or ["still"] if it says the object does not move, or []. Forward, backward and in reverse are not directions across the picture: leave them out.
+- "object": the main thing the answer is about, as a short noun phrase, or null.
+- "moves": if the answer says that thing moves across the picture, the directions it names ("left", "right", "up", "down"); ["still"] if it says the thing does not move; otherwise []. Forward, backward and in reverse are not directions across the picture: leave them out.
+- "order": if the answer says things happen in an order, short phrases for them in that order (at least two), each something one frame could show. An action that changes something also says an order: the state before it, then the state after it. Otherwise [].
 
 Example
 Question: What does the woman do after she opens the door?
-Options:
-A. She turns on the light.
-B. She sits down.
-JSON: {"object": "the woman", "moments": ["the woman opens the door", "the woman turns on the light", "the woman sits down"], "options": {"A": {"order": [0, 1], "moves": []}, "B": {"order": [0, 2], "moves": []}}}
+Answer: She turns on the light.
+JSON: {"object": "the woman", "moves": [], "order": ["the woman opens the door", "the woman turns on the light"]}
 
 Example
 Question: Two actions are shown. Action 1. pour milk. Action 2. stir the coffee. In what order?
-Options:
-A. First action 1, then action 2
-B. First action 2, then action 1
-JSON: {"object": null, "moments": ["pour milk", "stir the coffee"], "options": {"A": {"order": [0, 1], "moves": []}, "B": {"order": [1, 0], "moves": []}}}
+Answer: First action 2, then action 1
+JSON: {"object": null, "moves": [], "order": ["stir the coffee", "pour milk"]}
 
 Example
 Question: Which way does the red ball move?
-Options:
-A. Down and to the left.
-B. Up.
-C. It stays where it is.
-JSON: {"object": "the red ball", "moments": [], "options": {"A": {"order": [], "moves": ["left", "down"]}, "B": {"order": [], "moves": ["up"]}, "C": {"order": [], "moves": ["still"]}}}
+Answer: Up and to the right.
+JSON: {"object": "the red ball", "moves": ["right", "up"], "order": []}
 
 Example
 Question: Which of these actions happened in the video?
-Options:
-A. opening a drawer
-B. closing a drawer
-C. neither of the actions happened
-JSON: {"object": "the drawer", "moments": ["the drawer is closed", "the drawer is open"], "options": {"A": {"order": [0, 1], "moves": []}, "B": {"order": [1, 0], "moves": []}, "C": {"order": [], "moves": []}}}
+Answer: filling something
+JSON: {"object": "something", "moves": [], "order": ["something is empty", "something is full"]}
+
+Example
+Question: Which of these actions happened in the video?
+Answer: none of the above
+JSON: {"object": null, "moves": [], "order": []}
 
 Now this one.
 Question: <QUESTION>
-Options:
-<OPTIONS>
+Answer: <ANSWER>
 JSON:"""
+DIRECTION_WORDS = {"left": r"\bleft(ward)?s?\b", "right": r"\bright(ward)?s?\b", "up": r"\bup(ward)?s?\b",
+                   "down": r"\bdown(ward)?s?\b"}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Claims (numpy-free helpers, also imported by ground_dynin.py in the Dynin-Omni environment)
+# Claims (helpers without torch, also imported by ground_dynin.py in the Dynin-Omni environment)
 
-def extract_prompt(item):
-    options = "\n".join(f"{tv.LETTERS[i]}. {c}" for i, c in enumerate(item["candidates"]))
-    return EXTRACT_PROMPT.replace("<QUESTION>", item["question"].strip()).replace("<OPTIONS>", options)
+def option_prompt(item, index):
+    """What the claim reader is asked about one option: the question and that option alone."""
+    return OPTION_PROMPT.replace("<QUESTION>", item["question"].strip()).replace("<ANSWER>",
+                                                                                 item["candidates"][index].strip())
 
 
 def digest(text):
     return hashlib.sha1(text.encode()).hexdigest()[:16]
 
 
-def parse_claim(reply, count):
-    """The extractor's JSON, checked: order indices in range (at least two, none repeated), known directions only,
-    no contradictions (left and right, up and down, still and a direction); anything unusable is dropped, and so
-    are moments no option uses. Returns {"object", "moments", "options": {letter: {"order", "moves"}}}."""
-    empty = {"object": None, "moments": [], "options": {}}
+def parse_option(reply, option):
+    """What one option claims, from the reader's JSON reply: {"object", "moves", "order"}. The reader decides whether
+    the option is about movement across the picture; the directions are then the ones the option's own words name
+    (the reader's only if it names none), so a misread cannot swap left and right. An order needs two or more
+    different moments. Anything unusable is dropped."""
+    empty = {"object": None, "moves": [], "order": []}
     start = (reply or "").find("{")
     if start < 0:
         return empty
@@ -139,62 +135,70 @@ def parse_claim(reply, count):
     thing = data.get("object")
     thing = thing.strip().rstrip(".") if isinstance(thing, str) and thing.strip().lower() not in ("", "null", "none") \
         else None
-    moments = data.get("moments") if isinstance(data.get("moments"), list) else []
-    moments = [m.strip().rstrip(".") for m in moments if isinstance(m, str) and m.strip()][:MAX_MOMENTS]
-    stated = data.get("options") if isinstance(data.get("options"), dict) else {}
-    options = {}
-    for letter in tv.LETTERS[:count]:
-        said = stated.get(letter)
-        if not isinstance(said, dict):
-            continue
+    said = data.get("moves") if isinstance(data.get("moves"), list) else []
+    said = {m.strip().lower() for m in said if isinstance(m, str)} & set(DIRECTIONS)
+    named = {d for d, pattern in DIRECTION_WORDS.items() if re.search(pattern, option, re.I)}
+    moves = set() if not said else {"still"} if said == {"still"} else (named or said - {"still"})
+    if {"left", "right"} <= moves or {"up", "down"} <= moves:
+        moves = set()
+    order = []
+    for entry in data.get("order") if isinstance(data.get("order"), list) else []:
+        text = entry.strip().rstrip(".") if isinstance(entry, str) else ""
+        if not text or text.lower() in {m.lower() for m in order}:
+            order = []                      # an empty or repeated moment: the order cannot be read
+            break
+        order.append(text)
+    if not 2 <= len(order) <= MAX_MOMENTS:
         order = []
-        for entry in said.get("order") if isinstance(said.get("order"), list) else []:
-            if isinstance(entry, str):      # an index written as text, or the moment itself
-                text = entry.strip().rstrip(".").lower()
-                named = [j for j, m in enumerate(moments) if m.lower() == text]
-                order.append(int(text) if text.isdigit() else named[0] if named else -1)
-            elif isinstance(entry, (int, float)) and not isinstance(entry, bool) and float(entry).is_integer():
-                order.append(int(entry))
-            else:
-                order.append(-1)
-        if len(order) < 2 or len(set(order)) != len(order) or not all(0 <= i < len(moments) for i in order):
-            order = []                      # a partly unreadable order could be a wrong one
-        moves = said.get("moves") if isinstance(said.get("moves"), list) else []
-        moves = sorted({m.strip().lower() for m in moves if isinstance(m, str) and m.strip().lower() in DIRECTIONS})
-        if thing is None or ("still" in moves and len(moves) > 1) or {"left", "right"} <= set(moves) \
-                or {"up", "down"} <= set(moves):
-            moves = []
-        if order or moves:
-            options[letter] = {"order": order, "moves": moves}
-    used = sorted({i for said in options.values() for i in said["order"]})
-    renumber = {old: new for new, old in enumerate(used)}
-    for said in options.values():
-        said["order"] = [renumber[i] for i in said["order"]]
-    return {"object": thing, "moments": [moments[i] for i in used], "options": options}
+    return {"object": thing, "moves": sorted(moves), "order": order}
+
+
+def build_claim(item, replies):
+    """What every option of one question claims, from the reader's reply for each option:
+    {"object": the question's main object (the one most options name), "options": {letter: {"object", "moves",
+    "order"}}}. Options claiming nothing are left out; an option that moves without naming its object takes the
+    main one."""
+    parsed = [parse_option(reply, option) for reply, option in zip(replies, item["candidates"])]
+    objects = [p["object"] for p in parsed if p["object"]]
+    main = max(objects, key=lambda o: (objects.count(o), -objects.index(o))) if objects else None
+    options = {}
+    for letter, said in zip(tv.LETTERS, parsed):
+        if said["moves"] and not said["object"]:
+            said["object"] = main
+        if not said["object"]:
+            said["moves"] = []
+        if said["moves"] or said["order"]:
+            options[letter] = said
+    return {"object": main, "options": options}
 
 
 def claim_queries(claim):
     """(name, prompt) for everything attended to for one question: the question itself ("question"; Dynin-Omni
-    answers it with the multiple-choice prompt), the main object, and each moment."""
+    answers it with the multiple-choice prompt), its main object and every object said to move, and every moment
+    an option puts in order."""
+    objects, moments = [], []
+    for thing in [claim.get("object")] + [s["object"] for s in claim.get("options", {}).values() if s.get("moves")]:
+        if thing and thing not in objects:
+            objects.append(thing)
+    for said in claim.get("options", {}).values():
+        moments += [m for m in said.get("order", []) if m not in moments]
     queries = [("question", None)]
-    if claim.get("object"):
-        thing = claim["object"] if re.match(r"(the|a|an)\b", claim["object"], re.I) else "the " + claim["object"]
-        queries.append((f"object: {claim['object']}", f"Find {thing} in the video."))
-    queries += [(f"moment: {m}", f"Find this in the video: {m}.") for m in claim.get("moments", [])]
+    for thing in objects:
+        named = thing if re.match(r"(the|a|an|some)\b|something\b|someone\b", thing, re.I) else "the " + thing
+        queries.append((f"object: {thing}", f"Find {named} in the video."))
+    queries += [(f"moment: {m}", f"Find this in the video: {m}.") for m in moments]
     return queries
 
 
 def describe(claim):
     """One line for the log."""
-    parts = [f"object {claim['object']!r}" if claim.get("object") else "no object"]
-    for letter, said in sorted(claim.get("options", {}).items()):
-        bits = []
-        if said["order"]:
-            bits.append(" then ".join(repr(claim["moments"][i]) for i in said["order"]))
+    parts = []
+    for letter, said in claim.get("options", {}).items():
+        bits = [" then ".join(repr(m) for m in said["order"])] if said["order"] else []
         if said["moves"]:
-            bits.append("moves " + "+".join(said["moves"]))
+            bits.append(f"{said['object']!r} moves {'+'.join(said['moves'])}")
         parts.append(f"{letter}: {'; '.join(bits)}")
-    return ", ".join(parts) if claim.get("options") else parts[0] + ", no timing or motion claims"
+    return ", ".join(parts) or f"no timing or motion claims (main object {claim.get('object')!r})"
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -258,18 +262,17 @@ def option_evidence(claim, profiles, count):
     out = np.zeros((count, len(COMPONENTS)))
     if not claim or not profiles:
         return out
-    moments = claim.get("moments", [])
-    moving = drift(profiles.get(f"object: {claim['object']}")) if claim.get("object") else None
     for i, letter in enumerate(tv.LETTERS[:count]):
         said = claim.get("options", {}).get(letter)
         if not said:
             continue
-        steps = [timing(profiles.get(f"moment: {moments[a]}"), profiles.get(f"moment: {moments[b]}"))
+        steps = [timing(profiles.get(f"moment: {a}"), profiles.get(f"moment: {b}"))
                  for a, b in zip(said["order"], said["order"][1:])]
         steps = [s for s in steps if s is not None]
         if steps:
             out[i, 0] = float(np.mean(steps))
-        if moving is not None and said["moves"]:
+        moving = drift(profiles.get(f"object: {said['object']}")) if said["moves"] and said.get("object") else None
+        if moving is not None:
             if said["moves"] == ["still"]:
                 out[i, 2] = -math.hypot(*moving)
             else:
@@ -278,7 +281,6 @@ def option_evidence(claim, profiles, count):
                 if x or y:
                     out[i, 1] = (x * moving[0] + y * moving[1]) / math.hypot(x, y)
     return out
-
 
 def dynin_maps(path):
     """Dynin-Omni's saved maps for one video: {query name: (last4 [T, H, W], all layers [T, H, W])}; {} if none."""
@@ -360,7 +362,8 @@ def wanted_videos(args, names):
 
 
 def extract(args):
-    """Step 1: the claims of every question's options, from the text alone. Questions worded the same share a reply."""
+    """Step 1: what every option of every question claims, from the text alone, one option at a time. Options worded
+    the same (twins, repeated questions) share one reply."""
     import torch
     from execute_tabalign import Reasoner
 
@@ -369,10 +372,11 @@ def extract(args):
     path = args.out_dir / "dynin_evidence" / "claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = tv.load_rows(path)
-    replies = {row["digest"]: row["reply"] for row in rows.values() if row.get("digest")}
-    prompts = {k: extract_prompt(questions[k]) for k in wanted}
-    current = [k for k in wanted if k in rows and rows[k].get("digest") == digest(prompts[k])]   # read with this prompt
-    reparse = [k for k in current if rows[k].get("claim") != parse_claim(rows[k]["reply"], len(questions[k]["candidates"]))]
+    prompts = {k: [option_prompt(questions[k], i) for i in range(len(questions[k]["candidates"]))] for k in wanted}
+    digests = {k: [digest(p) for p in prompts[k]] for k in wanted}
+    replies = {d: r for row in rows.values() for d, r in zip(row.get("digests") or [], row.get("replies") or [])}
+    current = [k for k in wanted if k in rows and rows[k].get("digests") == digests[k]]    # read with these prompts
+    reparse = [k for k in current if rows[k].get("claim") != build_claim(questions[k], rows[k]["replies"])]
     todo = [k for k in wanted if k not in current]
     print(f"{len(wanted)} questions: {len(current) - len(reparse)} already read, {len(reparse)} to parse again, "
           f"{len(todo)} to read", flush=True)
@@ -380,27 +384,31 @@ def extract(args):
     def write(keys):
         with open(path, "a") as f:
             for k in keys:
-                reply = replies[digest(prompts[k])]
-                claim = parse_claim(reply, len(questions[k]["candidates"]))
-                f.write(json.dumps({"category": k[0], "video": k[1], "digest": digest(prompts[k]), "reply": reply,
+                answers = [replies[d] for d in digests[k]]
+                claim = build_claim(questions[k], answers)
+                f.write(json.dumps({"category": k[0], "video": k[1], "digests": digests[k], "replies": answers,
                                     "claim": claim}) + "\n")
                 print(f"   {k[0]}/{k[1]}: {describe(claim)}"
-                      + ("" if claim["options"] else f" (reply: {' '.join(reply.split())[:200]!r})"), flush=True)
+                      + ("" if claim["options"] else f" (option A's reply: {' '.join(answers[0].split())[:160]!r})"),
+                      flush=True)
 
-    write(reparse)                      # same reply, read by the current parser
-    waiting = {}
-    for k in todo:
-        waiting.setdefault(digest(prompts[k]), []).append(k)
-    write([k for d, keys in waiting.items() if d in replies for k in keys])
-    if all(d in replies for d in waiting):
+    write(reparse)                      # same replies, read by the current parser
+    ready = [k for k in todo if all(d in replies for d in digests[k])]
+    write(ready)
+    todo = [k for k in todo if k not in ready]
+    if not todo:
         return
+    pending, text_of = [], {}
+    for k in todo:
+        for d, p in zip(digests[k], prompts[k]):
+            if d not in replies and d not in text_of:
+                pending.append(d)
+                text_of[d] = p
 
     reasoner = Reasoner(args.model, args.max_vision_tokens)
     tokenizer = reasoner.processor.tokenizer
     tokenizer.padding_side = "left"                      # generation continues each prompt at the right edge
     pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
-    pending = [d for d in waiting if d not in replies]
-    text_of = {digest(p): p for p in prompts.values()}
     for start in range(0, len(pending), args.batch):
         batch = pending[start:start + args.batch]
         texts = [reasoner.processor.apply_chat_template([{"role": "user", "content": [{"type": "text", "text": text_of[d]}]}],
@@ -411,9 +419,10 @@ def extract(args):
                                           temperature=None, top_p=None, top_k=None, pad_token_id=pad)
         for d, sequence in zip(batch, out):
             replies[d] = tokenizer.decode(sequence[inputs["input_ids"].shape[1]:], skip_special_tokens=True).strip()
-        print(f"[{min(start + args.batch, len(pending))}/{len(pending)} differently worded questions]", flush=True)
-        write([k for d in batch for k in waiting[d]])
-
+        print(f"[{min(start + args.batch, len(pending))}/{len(pending)} differently worded options]", flush=True)
+        ready = [k for k in todo if all(d in replies for d in digests[k])]
+        write(ready)
+        todo = [k for k in todo if k not in ready]
 
 def run(args):
     """Step 3: Qwen3-VL's letter scores on the plain video and both zooms, and its own attention for the controls."""
@@ -754,8 +763,8 @@ def main():
     parser.add_argument("--limit", type=int, help="Only the first N videos (one pair per category in turn)")
     parser.add_argument("--fit-set", default="calib", help="Set whose videos fit the weights (--report)")
     parser.add_argument("--shuffles", type=int, default=20, help="Shuffles for the time-shuffled control (--report)")
-    parser.add_argument("--batch", type=int, default=8, help="Questions read at once (--extract)")
-    parser.add_argument("--extract-tokens", type=int, default=320, help="Longest reply when reading claims")
+    parser.add_argument("--batch", type=int, default=16, help="Options read at once (--extract)")
+    parser.add_argument("--extract-tokens", type=int, default=160, help="Longest reply when reading claims")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--direct", type=Path, default=Path("outputs/qwen3vl_8b/results.jsonl"))
