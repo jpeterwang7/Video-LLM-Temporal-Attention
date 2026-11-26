@@ -68,7 +68,7 @@ MAX_MOMENTS = 6
 EXTRACT_PROMPT = """Here is a multiple-choice question about a video. Do not answer it. Write down, as JSON, what each option claims that the video could show.
 
 - "object": the main thing the question is about (the one that moves, if the options describe movement), as a short noun phrase, or null.
-- "moments": short phrases for the events or states whose order in time the options are about: actions that happen one after another, something that happens before or after a thing the question names, or the states before and after a change ("opening the box" goes from "the box is closed" to "the box is open"). Each should be something one frame could show. [] if no option is about an order in time or a change.
+- "moments": short phrases for the events or states whose order in time the options are about: actions that happen one after another, or something that happens before or after a thing the question names. An option naming an action that changes something also claims an order: the state before the change, then the state after it ("plugging in the cable" goes from "the cable is unplugged" to "the cable is plugged in"; "a flower blooming" from "the flower is closed" to "the flower is open"). Each moment should be something one frame could show. [] if no option is about an order in time or a change.
 - "options": for each option letter, {"order": [...], "moves": [...]}.
   "order" lists indices into "moments" in the order this option says they happen (at least two), or [].
   "moves" lists the directions across the picture this option says the object moves ("left", "right", "up", "down"), or ["still"] if it says the object does not move, or []. Forward, backward and in reverse are not directions across the picture: leave them out.
@@ -96,12 +96,12 @@ C. It stays where it is.
 JSON: {"object": "the red ball", "moments": [], "options": {"A": {"order": [], "moves": ["left", "down"]}, "B": {"order": [], "moves": ["up"]}, "C": {"order": [], "moves": ["still"]}}}
 
 Example
-Question: What is happening to the towel?
+Question: Which of these actions happened in the video?
 Options:
-A. Being folded.
-B. Being unfolded.
-C. Nothing changes.
-JSON: {"object": "the towel", "moments": ["the towel is spread out flat", "the towel is folded up"], "options": {"A": {"order": [0, 1], "moves": []}, "B": {"order": [1, 0], "moves": []}, "C": {"order": [], "moves": []}}}
+A. opening a drawer
+B. closing a drawer
+C. neither of the actions happened
+JSON: {"object": "the drawer", "moments": ["the drawer is closed", "the drawer is open"], "options": {"A": {"order": [0, 1], "moves": []}, "B": {"order": [1, 0], "moves": []}, "C": {"order": [], "moves": []}}}
 
 Now this one.
 Question: <QUESTION>
@@ -147,11 +147,18 @@ def parse_claim(reply, count):
         said = stated.get(letter)
         if not isinstance(said, dict):
             continue
-        order = said.get("order") if isinstance(said.get("order"), list) else []
-        order = [int(i) for i in order if isinstance(i, (int, float)) and not isinstance(i, bool)
-                 and float(i).is_integer() and 0 <= int(i) < len(moments)]
-        if len(order) < 2 or len(set(order)) != len(order):
-            order = []
+        order = []
+        for entry in said.get("order") if isinstance(said.get("order"), list) else []:
+            if isinstance(entry, str):      # an index written as text, or the moment itself
+                text = entry.strip().rstrip(".").lower()
+                named = [j for j, m in enumerate(moments) if m.lower() == text]
+                order.append(int(text) if text.isdigit() else named[0] if named else -1)
+            elif isinstance(entry, (int, float)) and not isinstance(entry, bool) and float(entry).is_integer():
+                order.append(int(entry))
+            else:
+                order.append(-1)
+        if len(order) < 2 or len(set(order)) != len(order) or not all(0 <= i < len(moments) for i in order):
+            order = []                      # a partly unreadable order could be a wrong one
         moves = said.get("moves") if isinstance(said.get("moves"), list) else []
         moves = sorted({m.strip().lower() for m in moves if isinstance(m, str) and m.strip().lower() in DIRECTIONS})
         if thing is None or ("still" in moves and len(moves) > 1) or {"left", "right"} <= set(moves) \
@@ -282,6 +289,18 @@ def dynin_maps(path):
             for i, q in enumerate(data["queries"])}
 
 
+def claim_maps(args, key, claim):
+    """Dynin-Omni's maps for what this question's claims name (maps left from earlier claims are ignored)."""
+    names = {name for name, _ in claim_queries(claim)}
+    maps = dynin_maps(args.out_dir / "dynin_claims" / DYNIN_MODE / key[0] / (Path(key[1]).stem + ".npz"))
+    return {q: m for q, m in maps.items() if q in names}
+
+
+def claims_digest(row):
+    """Identifies the claims a result was computed from, so results are redone when the claims change."""
+    return digest(json.dumps(row["claim"], sort_keys=True)) if row else None
+
+
 def zoom_box(maps):
     """The box around Dynin-Omni's attention to the main object (else the moments, else the question), averaged
     over time steps, sinks left out: centred on the attention, 4 spreads across, each side kept between 40% and 80%
@@ -349,21 +368,14 @@ def extract(args):
     wanted = wanted_videos(args, args.set)
     path = args.out_dir / "dynin_evidence" / "claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    done = tv.load_rows(path)
-    todo = [k for k in wanted if k not in done]
-    print(f"{len(wanted)} questions, {len(wanted) - len(todo)} already have claims, {len(todo)} to read", flush=True)
-    if not todo:
-        return
-    replies = {row["digest"]: row["reply"] for row in done.values() if row.get("digest")}
-    prompts = {k: extract_prompt(questions[k]) for k in todo}
-    waiting = {}
-    for k in todo:
-        waiting.setdefault(digest(prompts[k]), []).append(k)
-
-    reasoner = Reasoner(args.model, args.max_vision_tokens)
-    tokenizer = reasoner.processor.tokenizer
-    tokenizer.padding_side = "left"                      # generation continues each prompt at the right edge
-    pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    rows = tv.load_rows(path)
+    replies = {row["digest"]: row["reply"] for row in rows.values() if row.get("digest")}
+    prompts = {k: extract_prompt(questions[k]) for k in wanted}
+    current = [k for k in wanted if k in rows and rows[k].get("digest") == digest(prompts[k])]   # read with this prompt
+    reparse = [k for k in current if rows[k].get("claim") != parse_claim(rows[k]["reply"], len(questions[k]["candidates"]))]
+    todo = [k for k in wanted if k not in current]
+    print(f"{len(wanted)} questions: {len(current) - len(reparse)} already read, {len(reparse)} to parse again, "
+          f"{len(todo)} to read", flush=True)
 
     def write(keys):
         with open(path, "a") as f:
@@ -372,9 +384,21 @@ def extract(args):
                 claim = parse_claim(reply, len(questions[k]["candidates"]))
                 f.write(json.dumps({"category": k[0], "video": k[1], "digest": digest(prompts[k]), "reply": reply,
                                     "claim": claim}) + "\n")
-                print(f"   {k[0]}/{k[1]}: {describe(claim)}", flush=True)
+                print(f"   {k[0]}/{k[1]}: {describe(claim)}"
+                      + ("" if claim["options"] else f" (reply: {' '.join(reply.split())[:200]!r})"), flush=True)
 
+    write(reparse)                      # same reply, read by the current parser
+    waiting = {}
+    for k in todo:
+        waiting.setdefault(digest(prompts[k]), []).append(k)
     write([k for d, keys in waiting.items() if d in replies for k in keys])
+    if all(d in replies for d in waiting):
+        return
+
+    reasoner = Reasoner(args.model, args.max_vision_tokens)
+    tokenizer = reasoner.processor.tokenizer
+    tokenizer.padding_side = "left"                      # generation continues each prompt at the right edge
+    pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
     pending = [d for d in waiting if d not in replies]
     text_of = {digest(p): p for p in prompts.values()}
     for start in range(0, len(pending), args.batch):
@@ -403,8 +427,8 @@ def run(args):
     wanted = wanted_videos(args, [args.set])
     path = args.out_dir / "dynin_evidence" / args.set / "results.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    done = tv.load_rows(path)
-    todo = [k for k in wanted if k not in done]
+    done = {k: r for k, r in tv.load_rows(path).items() if r.get("claims_digest") == claims_digest(claims.get(k))}
+    todo = [k for k in wanted if k not in done]          # new videos, and videos whose claims have changed
     print(f"{len(wanted)} videos, {len(wanted) - len(todo)} already done, {len(todo)} to run", flush=True)
     if not todo:
         return
@@ -453,7 +477,8 @@ def run(args):
         count = len(item["candidates"])
         row = {"category": key[0], "video": key[1],
                "answer_letter": tv.LETTERS[item["candidates"].index(item["answer"])],
-               "direct_correct": direct.get(key, {}).get("correct"), "direct_pred": direct.get(key, {}).get("pred_letter")}
+               "direct_correct": direct.get(key, {}).get("correct"), "direct_pred": direct.get(key, {}).get("pred_letter"),
+               "claims_digest": claims_digest(claims.get(key))}
         start = time.time()
         try:
             if key not in claims:
@@ -465,7 +490,7 @@ def run(args):
             row["lp_plain"] = letter_scores(reasoner._video_inputs(messages, video), count)
             row["single_pred"] = tv.LETTERS[int(np.argmax(row["lp_plain"]))]
 
-            maps = dynin_maps(args.out_dir / "dynin_claims" / DYNIN_MODE / key[0] / (Path(key[1]).stem + ".npz"))
+            maps = claim_maps(args, key, claim)
             box = zoom_box(maps)
             if box is not None:
                 other = random_box(box, np.random.default_rng(tv.video_seed(key[1], args.seed)))
@@ -580,8 +605,10 @@ def load_set(args, name, exclude, claims):
         if key not in rows or key not in claims:
             continue
         row, item, claim = rows[key], questions[key], claims[key]["claim"]
+        if row.get("claims_digest") != claims_digest(claims[key]):
+            continue                    # computed from older claims: run this set again first
         count = len(item["candidates"])
-        maps = dynin_maps(args.out_dir / "dynin_claims" / DYNIN_MODE / key[0] / (Path(key[1]).stem + ".npz"))
+        maps = claim_maps(args, key, claim)
         dynin = {q: map_profile(*maps[q]) for q in maps if q != "question"}
         qwen = {q: p for q, p in (row.get("qwen_profiles") or {}).items() if p is not None}
         videos.append({"key": key, "item": item, "row": row, "claim": claim, "count": count,
