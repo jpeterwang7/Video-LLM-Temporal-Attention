@@ -37,11 +37,20 @@ Writes <out-dir>/dynin_evidence/claims.jsonl, <out-dir>/dynin_evidence/<set>/res
 plain video and both zooms, the boxes, Qwen3-VL's own attention per time step), all resuming, and with --report
 summary.txt and weights.json in <out-dir>/dynin_evidence/<set>/.
 
+Dynin-Omni's maps are the mean of its last 4 layers (29-32). Its focus on the labelled object sharpens from about
+layer 24 on, and in the 5-frame runs its attention follows a video played backward best at layers 24-28. With
+--dynin-layers the timing and motion evidence (and the time-shuffled control) use other layers, from maps grounded
+with ground_dynin.py --all-layers: a range such as 24-28, or "choose" to pick among LAYER_BANDS on the fit set (the
+range whose evidence best predicts the right answer on held-out fit-set videos) before the test set is scored. The
+zoom rows keep the boxes they were scored with. This writes summary_layers.txt and weights_layers.json instead.
+
     python answer_with_dynin.py --extract --set calib test                       (Qwen3-VL environment)
     python ground_dynin.py --claims outputs/tabalign/dynin_evidence/claims.jsonl --set calib test --modes squeeze
     python answer_with_dynin.py --set calib
     python answer_with_dynin.py --set test --exclude-set smoke_test
     python answer_with_dynin.py --set test --exclude-set smoke_test --report --fit-set calib
+    python ground_dynin.py --claims outputs/tabalign/dynin_evidence/claims.jsonl --set calib test --modes squeeze --all-layers
+    python answer_with_dynin.py --set test --exclude-set smoke_test --report --fit-set calib --dynin-layers choose
 """
 import argparse
 import hashlib
@@ -64,6 +73,7 @@ TWO_VIEWS = ("The first video shows the whole scene. The second video is the sam
              "the picture.\n")
 COMPONENTS = ["timing", "motion", "still"]
 PENALTY = 1.0                   # L2 penalty on the evidence weights (evidence scaled to unit spread)
+LAYER_BANDS = [(29, 32), (24, 32), (24, 28), (20, 29)]     # --dynin-layers choose (1-based, inclusive; 29-32 = last 4)
 DIRECTIONS = ("left", "right", "up", "down", "still")
 MAX_MOMENTS = 6
 
@@ -322,19 +332,32 @@ def option_evidence(claim, profiles, count):
                     out[i, 1] = (x * moving[0] + y * moving[1]) / math.hypot(x, y)
     return out
 
-def dynin_maps(path):
-    """Dynin-Omni's saved maps for one video: {query name: (last4 [T, H, W], all layers [T, H, W])}; {} if none."""
+def dynin_maps(path, layers=None):
+    """Dynin-Omni's saved maps for one video: {query name: (map [T, H, W], all layers [T, H, W])}; {} if none. The map
+    is the mean of the last 4 layers, or with layers=(first, last) (1-based, inclusive) of those layers, from a file
+    that kept every layer (ground_dynin.py --all-layers)."""
     if not Path(path).exists():
         return {}
-    data = np.load(path)
-    return {str(q): (data["last4"][i].astype(np.float32), data["all"][i].astype(np.float32))
-            for i, q in enumerate(data["queries"])}
+    data = np.load(path)                # each data[...] decompresses that array again, so read each one once
+    if layers is None:
+        chosen = data["last4"].astype(np.float32)
+    else:
+        if "layers" not in data.files:
+            raise SystemExit(f"{path} has no per-layer maps (ground them with ground_dynin.py --all-layers)")
+        stack = data["layers"]
+        if layers[1] > stack.shape[1]:
+            raise SystemExit(f"layers {layers[0]}-{layers[1]} asked for, but {path} has {stack.shape[1]}")
+        chosen = stack[:, layers[0] - 1:layers[1]].astype(np.float32).mean(axis=1)
+    every = data["all"].astype(np.float32)
+    return {str(q): (chosen[i], every[i]) for i, q in enumerate(data["queries"])}
 
 
-def claim_maps(args, key, claim):
-    """Dynin-Omni's maps for what this question's claims name (maps left from earlier claims are ignored)."""
+def claim_maps(args, key, claim, layers=None):
+    """Dynin-Omni's maps for what this question's claims name (maps left from earlier claims are ignored): the last 4
+    layers from dynin_claims/, or the given layers from dynin_claims_layers/."""
     names = {name for name, _ in claim_queries(claim)}
-    maps = dynin_maps(args.out_dir / "dynin_claims" / DYNIN_MODE / key[0] / (Path(key[1]).stem + ".npz"))
+    folder = "dynin_claims" if layers is None else "dynin_claims_layers"
+    maps = dynin_maps(args.out_dir / folder / DYNIN_MODE / key[0] / (Path(key[1]).stem + ".npz"), layers)
     return {q: m for q, m in maps.items() if q in names}
 
 
@@ -675,7 +698,7 @@ def time_shuffled(profiles, rng):
             for name, p in profiles.items()}
 
 
-def load_set(args, name, exclude, claims):
+def load_set(args, name, exclude, claims, layers=None):
     questions = tv.load_questions(args.data_dir)
     sets = tv.load_sets(args.out_dir / "sets.json")
     rows = tv.load_rows(args.out_dir / "dynin_evidence" / name / "results.jsonl")
@@ -687,7 +710,7 @@ def load_set(args, name, exclude, claims):
         if row.get("claims_digest") != claims_digest(claims[key]):
             continue                    # computed from older claims: run this set again first
         count = len(item["candidates"])
-        maps = claim_maps(args, key, claim)
+        maps = claim_maps(args, key, claim, layers)
         dynin = {q: map_profile(*maps[q]) for q in maps if q != "question"}
         qwen = {q: p for q, p in (row.get("qwen_profiles") or {}).items() if p is not None}
         videos.append({"key": key, "item": item, "row": row, "claim": claim, "count": count,
@@ -695,7 +718,7 @@ def load_set(args, name, exclude, claims):
                        "lp_plain": np.asarray(row["lp_plain"], dtype=np.float64),
                        "lp_zoom": np.asarray(row.get("lp_zoom_dynin", row["lp_plain"]), dtype=np.float64),
                        "lp_random": np.asarray(row.get("lp_zoom_random", row["lp_plain"]), dtype=np.float64),
-                       "zoomed": "lp_zoom_dynin" in row, "dynin": dynin, "qwen": qwen,
+                       "zoomed": "lp_zoom_dynin" in row, "dynin": dynin, "qwen": qwen, "maps_found": bool(maps),
                        "ev_dynin": option_evidence(claim, dynin, count), "ev_qwen": option_evidence(claim, qwen, count)})
     return videos
 
@@ -716,12 +739,95 @@ def evidence_alone(v, ev, columns):
     return max(speaks, key=lambda i: score[i]) == v["answer"]
 
 
+def parse_layers(text):
+    """'24-28' -> (24, 28): Dynin-Omni's layers 24 to 28 (1-based, inclusive)."""
+    match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", text)
+    if not match or not 1 <= int(match.group(1)) <= int(match.group(2)):
+        raise SystemExit(f"--dynin-layers takes a range such as 24-28, or choose (got {text!r})")
+    return int(match.group(1)), int(match.group(2))
+
+
+def band_name(layers):
+    return "the last 4 (29-32)" if layers is None else f"{layers[0]}-{layers[1]}"
+
+
+def share(flags):
+    return f"{100 * np.mean(flags):.1f}% of {len(flags)}" if len(flags) else "-"
+
+
+def log_likelihood(lp, ev, answer, fitted):
+    """log p(right option) under score = a * lp + w . evidence / spread."""
+    a, w, spread = fitted
+    z = np.divide(ev, spread, out=np.zeros_like(ev), where=spread > 0)
+    s = a * np.asarray(lp, dtype=np.float64) + z @ w
+    s = s - s.max()
+    return float(s[answer] - math.log(np.exp(s).sum()))
+
+
+def held_out_fit(videos, evidence, folds=5):
+    """Mean log-likelihood of the right option on videos left out of the fit (5 folds; a video and its twin in the
+    same fold), for Qwen3-VL's plain scores plus evidence(video)."""
+    fold = [tv.video_seed(tv.pair_name(v["key"][1])) % folds for v in videos]
+    total = 0.0
+    for f in range(folds):
+        fitted = fit_weights([(v["lp_plain"], evidence(v), v["answer"]) for v, g in zip(videos, fold) if g != f])
+        total += sum(log_likelihood(v["lp_plain"], evidence(v), v["answer"], fitted)
+                     for v, g in zip(videos, fold) if g == f)
+    return total / len(videos)
+
+
+def twin_flips(videos, column):
+    """DyBench's twins (a video and its _reversed twin: the same question, the events in the opposite order): per
+    pair, whether column `column` of the evidence changes sign between the two, on the first option both have it for.
+    Attention that follows the video flips every time. {"dynin" / "qwen": {category: [flipped, ...]}}."""
+    by_key = {v["key"]: v for v in videos}
+    out = {"dynin": {}, "qwen": {}}
+    for key, v in by_key.items():
+        other = by_key.get((key[0], tv.twin(key[1])))
+        if key[1].endswith("_reversed.mp4") or other is None or other["claim"] != v["claim"]:
+            continue
+        for source, found in out.items():
+            a, b = v[f"ev_{source}"][:, column], other[f"ev_{source}"][:, column]
+            both = [i for i in range(min(len(a), len(b))) if a[i] != 0 and b[i] != 0]
+            if both:
+                found.setdefault(key[0], []).append(bool(np.sign(a[both[0]]) != np.sign(b[both[0]])))
+    return out
+
+
 def report(args):
     claims = tv.load_rows(args.out_dir / "dynin_evidence" / "claims.jsonl")
-    fit_videos = load_set(args, args.fit_set, [] if args.fit_set != args.set else args.exclude_set, claims)
-    test_videos = load_set(args, args.set, args.exclude_set, claims)
-    if not fit_videos or not test_videos:
+    if args.dynin_layers is None:
+        bands = [None]                 # the last 4 layers, from dynin_claims/
+    elif args.dynin_layers.strip().lower() == "choose":
+        bands = LAYER_BANDS
+    else:
+        bands = [parse_layers(args.dynin_layers)]
+    fit_exclude = [] if args.fit_set != args.set else args.exclude_set
+    fit_sets = {b: load_set(args, args.fit_set, fit_exclude, claims, b) for b in bands}
+    test_sets = {b: load_set(args, args.set, args.exclude_set, claims, b) for b in bands}
+    if not fit_sets[bands[0]] or not test_sets[bands[0]]:
         raise SystemExit("Nothing to report yet")
+    if not any(v["maps_found"] for v in test_sets[bands[0]]):
+        folder = "dynin_claims" if bands[0] is None else "dynin_claims_layers"
+        raise SystemExit(f"No Dynin-Omni maps in {args.out_dir / folder / DYNIN_MODE} for the {args.set} videos")
+    band, choice = bands[0], []
+    if len(bands) > 1:                 # Dynin-Omni's layers are picked on the fit set only
+        held_out = {b: held_out_fit(fit_sets[b], lambda v: v["ev_dynin"]) for b in bands}
+        band = max(bands, key=lambda b: held_out[b])
+        alone = held_out_fit(fit_sets[band], lambda v: np.zeros_like(v["ev_dynin"]))
+        choice = [f"Dynin-Omni's layers, chosen on {args.fit_set} ({len(fit_sets[band])} videos): the range whose timing "
+                  "and motion evidence, added to Qwen3-VL's scores, best predicts the right answer on videos left out "
+                  f"of the fit (mean log-likelihood of the right option, 5 folds; Qwen3-VL alone {alone:.4f})",
+                  f"   {'layers':<8}{'held out':>10}   {'timing alone':<16}{'motion alone':<16}twins: timing flips"]
+        for b in bands:
+            videos = fit_sets[b]
+            timing_alone = [s for s in (evidence_alone(v, v["ev_dynin"], [0]) for v in videos) if s is not None]
+            motion_alone = [s for s in (evidence_alone(v, v["ev_dynin"], [1, 2]) for v in videos) if s is not None]
+            flips = [f for per in twin_flips(videos, 0)["dynin"].values() for f in per]
+            choice.append(f"   {band_name(b):<8}{held_out[b]:>10.4f}   {share(timing_alone):<16}{share(motion_alone):<16}"
+                          f"{share(flips)}" + ("   <- chosen" if b == band else ""))
+        choice.append("")
+    fit_videos, test_videos = fit_sets[band], test_sets[band]
     n = len(test_videos)
     groups = [("All", list(range(n)))] + [(SHORT.get(c, c), [i for i, v in enumerate(test_videos) if v["key"][0] == c])
                                           for c in sorted({v["key"][0] for v in test_videos},
@@ -759,8 +865,11 @@ def report(args):
              + (f", without {', '.join(args.exclude_set)}" if args.exclude_set else "")
              + f"): {n} videos; one set of weights for every question, fitted on {args.fit_set} ({len(fit_videos)} videos)",
              "Accuracy in % (videos); vs alone = right only with this method / right only with Qwen3-VL alone, exact "
-             "McNemar p. Categories are DyBench's, used only for this breakdown.", "",
-             f"{'method':<44}" + "".join(f"{label:>14}" for label, _ in groups) + f"{'vs alone':>22}"]
+             "McNemar p. Categories are DyBench's, used only for this breakdown."]
+    if band is not None:
+        lines.append(f"Dynin-Omni's maps: layers {band_name(band)}, for its timing and motion evidence and the "
+                     "time-shuffled control (the zoom rows keep the boxes they were scored with).")
+    lines += [""] + choice + [f"{'method':<44}" + "".join(f"{label:>14}" for label, _ in groups) + f"{'vs alone':>22}"]
     for label, preds in methods:
         ok = right(preds)
         cells = "".join(f"{100 * np.mean([ok[i] for i in m]):6.1f} ({len(m):3d})".rjust(14) if m else "-".rjust(14)
@@ -784,6 +893,8 @@ def report(args):
         lines.append(f"   {label:<14} timing and motion against alone: +{a}/-{b}, p = {p:.2g}")
     lines.append(f"{sum(v['zoomed'] for v in test_videos)} of {n} videos had a zoom box (the rest keep the plain "
                  "scores in the zoom rows).")
+    lines.append(f"Dynin-Omni's maps found for {sum(v['maps_found'] for v in test_videos)} of {n} videos "
+                 f"({sum(v['maps_found'] for v in fit_videos)} of {len(fit_videos)} in {args.fit_set}).")
 
     lines += ["", "What the options claim (test): share of questions with an order-in-time claim / a direction claim"]
     for label, members in groups:
@@ -802,6 +913,32 @@ def report(args):
                 cells.append(f"{label} {100 * np.mean(says):.1f}% of {len(says)}" if says else f"{label} -")
             lines.append(f"   {kind:<17}{'Dynin-Omni' if source == 'dynin' else 'Qwen3-VL':<12}" + "; ".join(cells))
 
+    flips = twin_flips(test_videos, 0)
+    paired = sorted({c for per in flips.values() for c in per},
+                    key=lambda c: tv.CATEGORIES.index(c) if c in tv.CATEGORIES else 99)
+    if paired:
+        lines += ["", "Twins (a video and its _reversed twin: the same question, the events in the opposite order): how "
+                  "often the timing evidence flips with the video (every time if the attention follows the video; "
+                  "50% is chance)"]
+        for c in paired:
+            lines.append(f"   {SHORT.get(c, c):<14} Dynin-Omni {share(flips['dynin'].get(c, []))}; "
+                         f"Qwen3-VL {share(flips['qwen'].get(c, []))}")
+
+    if len(bands) > 1:
+        lines += ["", f"The other layer ranges on {args.set} (not used to choose; for reference)"]
+        for b in bands:
+            if b == band:
+                continue
+            if [v["key"] for v in test_sets[b]] != [v["key"] for v in test_videos]:
+                raise SystemExit("The layer ranges loaded different videos")
+            preds, _ = evaluate(fit_sets[b], test_sets[b], "lp_plain", lambda i, b=b: fit_sets[b][i]["ev_dynin"],
+                                lambda i, b=b: test_sets[b][i]["ev_dynin"])
+            ok = right(preds)
+            gained, lost, p = tv.mcnemar(ok, base)
+            band_flips = [f for per in twin_flips(test_sets[b], 0)["dynin"].values() for f in per]
+            lines.append(f"   layers {band_name(b):<8} + Dynin-Omni timing and motion {100 * np.mean(ok):.1f}% "
+                         f"(+{gained}/-{lost} p={p:.2g}); twins: timing flips {share(band_flips)}")
+
     weights = {}
     lines += ["", "Weights (a on Qwen3-VL's log-probabilities; evidence weights per unit spread):"]
     for label, fitted in [("timing and motion", dynin_fit), ("Qwen3-VL's own attention", qwen_fit),
@@ -818,9 +955,11 @@ def report(args):
     text = "\n".join(lines)
     print(text)
     out = args.out_dir / "dynin_evidence" / args.set
-    (out / "summary.txt").write_text(text + "\n")
-    (out / "weights.json").write_text(json.dumps({"fit_set": args.fit_set, "videos": len(fit_videos), **weights}, indent=1))
-    print(f"\nWritten to {out / 'summary.txt'} and {out / 'weights.json'}")
+    suffix = "" if args.dynin_layers is None else "_layers"
+    (out / f"summary{suffix}.txt").write_text(text + "\n")
+    (out / f"weights{suffix}.json").write_text(json.dumps({"fit_set": args.fit_set, "videos": len(fit_videos),
+                                                            "dynin_layers": band_name(band), **weights}, indent=1))
+    print(f"\nWritten to {out / f'summary{suffix}.txt'} and {out / f'weights{suffix}.json'}")
 
 
 def main():
@@ -833,6 +972,9 @@ def main():
     parser.add_argument("--limit", type=int, help="Only the first N videos (one pair per category in turn)")
     parser.add_argument("--fit-set", default="calib", help="Set whose videos fit the weights (--report)")
     parser.add_argument("--shuffles", type=int, default=20, help="Shuffles for the time-shuffled control (--report)")
+    parser.add_argument("--dynin-layers",
+                        help="Dynin-Omni's layers for the evidence (--report): a range such as 24-28, or choose (picked "
+                             "on --fit-set among LAYER_BANDS); needs ground_dynin.py --all-layers. Default: the last 4")
     parser.add_argument("--batch", type=int, default=16, help="Options read at once (--extract)")
     parser.add_argument("--extract-tokens", type=int, default=160, help="Longest reply when reading claims")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)

@@ -25,6 +25,12 @@
 # gives timing and motion evidence, plus a second view zoomed in where Dynin-Omni looks:
 #   ./run_tabalign.sh evidence-smoke  the 6 debugging videos (a few minutes), to check it runs
 #   ./run_tabalign.sh evidence        the 260 validation and 620 test videos (1 to 2 hours); resumes if stopped
+#
+# The same evidence from other Dynin-Omni layers than the last 4 (its focus sharpens from about layer 24): Dynin-Omni
+# grounds the same claims again keeping every layer (dynin_claims_layers/), the layer range is picked on the 260
+# validation videos, and the 620 test videos are scored with it; Qwen3-VL's scores from "evidence" are reused:
+#   ./run_tabalign.sh evidence-layers-smoke  the 6 debugging videos (a few minutes), to check it runs
+#   ./run_tabalign.sh evidence-layers        validation and test (about 20 minutes); resumes if stopped
 
 cd "$(dirname "$0")"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True     # less fragmentation on the 24 GB card
@@ -33,8 +39,10 @@ DYNIN=.venv-dynin/bin/python
 MODE=${1:-smoke}
 case "$MODE" in
     smoke) CAL=smoke_calib; TEST=smoke_test; OUT=outputs/tabalign_smoke ;;
-    full|summary|preview|steer|steer-smoke|evidence|evidence-smoke) CAL=calib; TEST=test; OUT=outputs/tabalign ;;
-    *) echo "Usage: $0 smoke|preview [N]|full|summary|steer-smoke|steer|evidence-smoke|evidence"; exit 1 ;;
+    full|summary|preview|steer|steer-smoke|evidence|evidence-smoke|evidence-layers|evidence-layers-smoke)
+        CAL=calib; TEST=test; OUT=outputs/tabalign ;;
+    *) echo "Usage: $0 smoke|preview [N]|full|summary|steer-smoke|steer|evidence-smoke|evidence|evidence-layers-smoke|evidence-layers"
+       exit 1 ;;
 esac
 mkdir -p "$OUT"
 LOG="$OUT/log.txt"
@@ -97,6 +105,30 @@ if [ "$MODE" = evidence ]; then
     run $MAIN answer_with_dynin.py --set $TEST --exclude-set smoke_test --report --fit-set $CAL --out-dir "$OUT"
     tar czf "$OUT/evidence_results.tar.gz" -C "$OUT" sets.json dynin_evidence dynin_claims
     echo "Results to copy back: $OUT/evidence_results.tar.gz"
+    exit 0
+fi
+
+if [ "$MODE" = evidence-layers-smoke ]; then
+    [ -f "$OUT/dynin_evidence/smoke_test/results.jsonl" ] || { echo "FAILED: run ./run_tabalign.sh evidence-smoke first" | tee -a "$LOG"; exit 1; }
+    run $DYNIN ground_dynin.py --claims "$OUT/dynin_evidence/claims.jsonl" --set smoke_test --modes squeeze --all-layers \
+        --out-dir "$OUT"
+    run $MAIN answer_with_dynin.py --set smoke_test --report --fit-set smoke_test --shuffles 2 --dynin-layers choose \
+        --out-dir "$OUT"
+    echo "EVIDENCE LAYERS SMOKE DONE: table above (layers chosen and weights fitted on the same 6 videos, so it only shows that it runs)"
+    exit 0
+fi
+
+if [ "$MODE" = evidence-layers ]; then
+    for name in $CAL $TEST; do
+        [ -f "$OUT/dynin_evidence/$name/results.jsonl" ] || { echo "FAILED: run ./run_tabalign.sh evidence first" | tee -a "$LOG"; exit 1; }
+    done
+    run $DYNIN ground_dynin.py --claims "$OUT/dynin_evidence/claims.jsonl" --set $CAL $TEST --modes squeeze --all-layers \
+        --out-dir "$OUT"
+    run $MAIN answer_with_dynin.py --set $TEST --exclude-set smoke_test --report --fit-set $CAL --dynin-layers choose \
+        --out-dir "$OUT"
+    tar czf "$OUT/evidence_layers.tar.gz" -C "$OUT" dynin_claims_layers "dynin_evidence/$TEST/summary_layers.txt" \
+        "dynin_evidence/$TEST/weights_layers.json"
+    echo "Results to copy back: $OUT/evidence_layers.tar.gz"
     exit 0
 fi
 

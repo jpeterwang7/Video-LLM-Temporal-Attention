@@ -25,9 +25,14 @@ With --claims it grounds what each question's options claim instead of the plan 
 --extract): the question, its main object ("Find the <object> in the video.") and each moment the options put in
 order ("Find this in the video: <moment>."), into <out-dir>/dynin_claims/<mode>/..., for answer_with_dynin.py.
 
+With --all-layers every layer's map is kept as well (layers: [queries, layers, T, 14, 14]), so maps from other layers
+than the last 4 can be used (answer_with_dynin.py --dynin-layers). These go to their own folder, dynin_layers/ (or
+dynin_claims_layers/ with --claims), and leave the earlier maps as they are.
+
 Usage (Dynin-Omni environment, after plan_tabalign.py):
     python ground_dynin.py --set calib test
     python ground_dynin.py --claims outputs/tabalign/dynin_evidence/claims.jsonl --set calib test --modes squeeze
+    python ground_dynin.py --claims outputs/tabalign/dynin_evidence/claims.jsonl --set calib test --modes squeeze --all-layers
 """
 import argparse
 import json
@@ -93,6 +98,8 @@ def main():
     parser.add_argument("--claims", type=Path,
                         help="Ground what each question's options claim (answer_with_dynin.py --extract; into "
                              "dynin_claims/), not the plan targets")
+    parser.add_argument("--all-layers", action="store_true",
+                        help="Also keep every layer's map, in dynin_layers/ (dynin_claims_layers/ with --claims)")
     parser.add_argument("--out-dir", type=Path, default=tv.OUT_DIR)
     parser.add_argument("--data-dir", type=Path, default=Path("DyBench"))
     parser.add_argument("--dynin-repo", type=Path, default=Path.home() / "Dynin-Omni")
@@ -126,6 +133,8 @@ def main():
         prompts = {}
         targets = plan_targets(args.out_dir)
         root = args.out_dir / "dynin"
+    if args.all_layers:
+        root = root.with_name(root.name + "_layers")
     root.mkdir(parents=True, exist_ok=True)
     results = {mode: root / f"results_{mode}.jsonl" for mode in args.modes}
     done = {mode: tv.load_rows(path) for mode, path in results.items()}
@@ -184,7 +193,7 @@ def main():
                         raise RuntimeError(f"{video_tokens.shape[1]} video tokens for {steps} frames")
                     head = torch.cat([special["<|v2t|>"], special["<|soi|>"], video_tokens, special["<|eoi|>"],
                                       special["<|sot|>"]], dim=1)
-                    last4, every = [], []
+                    last4, every, per_layer = [], [], []
                     for q in queries:
                         text = build_prompt(item) if q == "question" else \
                             prompts[key][q] if args.claims else grounding_prompt(q)
@@ -200,6 +209,8 @@ def main():
                         video_rows = rows[:, 2:2 + video_tokens.shape[1]].reshape(len(blocks), steps, side, side)
                         last4.append(video_rows[-tv.ATTN_LAYERS:].mean(axis=0))
                         every.append(video_rows.mean(axis=0))
+                        if args.all_layers:
+                            per_layer.append(video_rows.astype(np.float16))
                         if q == "question":
                             answer = decode_answer(model, canvas, prompt_len, args.gen_length, first)
                             response = uni_prompting.text_tokenizer.batch_decode(answer, skip_special_tokens=True)[0].strip()
@@ -207,11 +218,12 @@ def main():
                             row.update(response=response, pred_letter=pred, correct=pred == row["answer_letter"])
                 out = root / mode / key[0] / (Path(key[1]).stem + ".npz")
                 out.parent.mkdir(parents=True, exist_ok=True)
+                extra = {"layers": np.stack(per_layer)} if args.all_layers else {}
                 np.savez_compressed(out, queries=np.array(queries), last4=np.stack(last4).astype(np.float16),
                                     all=np.stack(every).astype(np.float16),
                                     frame_times=np.array([indices[p] / native_fps for p in picked], dtype=np.float32),
                                     crop=np.array(crop_window(width, height, args.resolution) if mode == "crop"
-                                                  else (0.0, 0.0, 1.0, 1.0), dtype=np.float32))
+                                                  else (0.0, 0.0, 1.0, 1.0), dtype=np.float32), **extra)
                 row.update(file=str(out.relative_to(root)), time_steps=steps)
             except Exception as e:
                 row["error"] = f"{type(e).__name__}: {e}"
